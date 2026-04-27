@@ -1,0 +1,394 @@
+Minimal Codex Spec v2: Expert-Oriented Diagnosis-Only SEAL/RCL Loop
+
+Purpose
+-------
+
+Implement a minimal but modular infectious disease diagnosis-only SEAL/RCL loop.
+
+The purpose is run viability and expert-formation scaffolding, not general-population simulation.
+
+RCL definition:
+- No model weight updates.
+- No policy-gradient RL.
+- No fine-tuning.
+- Learning occurs through retrieved context: successful diagnosis cases and validated diagnostic reflections.
+
+The initial loop must remain simple:
+- expert-lane weighted sampling
+- patient vignette generation
+- optional binary patient QC
+- diagnosis-only answer
+- binary hidden judge
+- one same-patient retry with provisional reflection
+- save only successful cases and validated reflections
+
+Runtime Files
+-------------
+
+Use these files:
+
+data/infectious_diseases_seal_expert_rcl_kb_v6_compact.json
+data/expert_curriculum_sampler_config_v1.json
+
+The main condition list is:
+
+core_infectious_disease_conditions
+
+Each condition includes:
+- existing seal_diagnosis_task fields
+- expert_curriculum profile
+
+Important: do not sample diseases by general-population prevalence. The goal is to create an infectious diseases expert through deliberate diagnostic experience.
+
+Project Structure
+-----------------
+
+Keep modularity clear but do not overengineer.
+
+project_root/
+├── data/
+│   ├── infectious_diseases_seal_expert_rcl_kb_v6_compact.json
+│   └── expert_curriculum_sampler_config_v1.json
+├── hf_cache/
+├── runs/
+├── run_simulation.py
+└── src/
+    ├── backends.py
+    ├── kb.py
+    ├── sampler.py
+    ├── prompts.py
+    ├── patient_qc.py
+    ├── judge.py
+    ├── memory.py
+    ├── loop.py
+    └── utils.py
+
+Working Directory Rule
+----------------------
+
+Assume all jobs are launched from the intended project directory.
+
+Do NOT implement automatic chdir/project-root reorientation.
+
+Do NOT call:
+os.chdir(resolve_project_root())
+
+Treat relative paths as relative to the current working directory.
+
+Fail clearly if required paths do not exist.
+
+Backend Interface
+-----------------
+
+All generation must go through a common interface:
+
+class LLMBackend:
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> str:
+        ...
+
+Implement:
+- OllamaBackend
+- HuggingFaceBackend
+
+Hugging Face cache should default to paths under the current working directory:
+
+HF_HOME=hf_cache
+HF_HUB_CACHE=hf_cache/hub
+TRANSFORMERS_CACHE=hf_cache/transformers
+HF_DATASETS_CACHE=hf_cache/datasets
+TOKENIZERS_PARALLELISM=false
+
+CLI
+---
+
+Example Ollama run:
+
+python run_simulation.py \
+  --backend ollama \
+  --model qwen3.5:9b \
+  --kb_path data/infectious_diseases_seal_expert_rcl_kb_v6_compact.json \
+  --sampler_config data/expert_curriculum_sampler_config_v1.json \
+  --n_successful_cases 20 \
+  --eval_every 5 \
+  --run_name expert_diagnosis_rcl_viability
+
+Example Hugging Face run:
+
+python run_simulation.py \
+  --backend hf \
+  --model Qwen/Qwen3.5-9B-Instruct \
+  --kb_path data/infectious_diseases_seal_expert_rcl_kb_v6_compact.json \
+  --sampler_config data/expert_curriculum_sampler_config_v1.json \
+  --n_successful_cases 20 \
+  --eval_every 5 \
+  --run_name expert_diagnosis_rcl_viability_hf
+
+Required args:
+- --backend {ollama,hf}
+- --model
+- --kb_path
+- --sampler_config
+- --n_successful_cases
+- --eval_every
+- --run_name
+
+Optional args:
+- --temperature default=0.2
+- --max_tokens default=768
+- --seed default=17
+- --n_success_memory default=5
+- --n_reflection_memory default=5
+- --ollama_host default=http://localhost:11434
+- --patient_qc default=false
+
+Knowledge Base Loader
+---------------------
+
+Load:
+kb["core_infectious_disease_conditions"]
+
+Keep only conditions where:
+condition["seal_diagnosis_task"]["task_inclusion"] == "include"
+
+Expert Sampler
+--------------
+
+Do not use uniform random sampling as the main strategy.
+
+Use the sampler config:
+
+1. Weighted-sample a training lane from active_lanes_initial.
+2. Filter conditions where condition["expert_curriculum"]["curriculum_lanes"] includes that lane.
+3. Prefer conditions with:
+   - expert_value == "high" or "medium"
+   - fewer successful saved cases in the current run
+   - must_not_miss == true when the lane is high_consequence_must_not_miss
+4. If no conditions match the lane, fall back to core_syndrome_reasoning.
+5. If still no match, use disease-only uniform random fallback.
+
+Default active lane weights:
+
+core_syndrome_reasoning: 0.30
+high_consequence_must_not_miss: 0.20
+travel_tropical_vector_zoonotic: 0.15
+immunocompromised_or_healthcare_context: 0.15
+common_infection_with_expert_trap: 0.10
+lookalike_differential_discrimination: 0.10
+
+This is a curriculum sampler, not a prevalence sampler.
+
+Patient Generation Prompt
+-------------------------
+
+Use condition["expert_curriculum"] and condition["seal_diagnosis_task"]["patient_generation"].
+
+Prompt template:
+
+You are generating a synthetic patient vignette for a closed infectious disease diagnosis simulation.
+
+The goal is to train infectious diseases expert diagnostic reasoning, not to reflect general-population prevalence.
+
+Hidden condition:
+{condition_json}
+
+Expert curriculum profile:
+{expert_curriculum_json}
+
+Generate a concise but diagnostically useful patient case.
+
+Rules:
+- Do not reveal the disease name.
+- Do not reveal the pathogen name.
+- Do not reveal the condition ID.
+- Include age, sex, chief complaint, symptom timeline, relevant exposure or host factor, relevant negatives, and basic objective clues.
+- Include at least one key discriminator from the expert profile when possible.
+- If lookalike differentials are listed, create a case where the gold diagnosis is distinguishable but not artificially obvious.
+- Return plain text only.
+
+Optional Patient QC
+-------------------
+
+Patient QC is binary and discard-only.
+
+No repair.
+No editing.
+No scoring.
+
+QC output:
+
+{
+  "usable": 1 or 0,
+  "reason": null or "short reason"
+}
+
+Mark unusable if:
+- diagnosis/pathogen/condition ID is directly leaked
+- the vignette is unrelated to the condition
+- the vignette lacks enough diagnostic information
+- the vignette contradicts the key host/exposure context
+
+Doctor Diagnosis Prompt
+-----------------------
+
+Prompt template:
+
+You are an infectious diseases doctor-agent in a closed diagnosis simulation.
+
+Your goal is expert diagnosis, not generic population-level guessing.
+
+Previous successful cases and validated diagnostic reflections:
+{memory_context}
+
+Current patient case:
+{patient_case}
+
+Task:
+Give the most likely infectious diagnosis and a short diagnostic justification.
+
+Return using exactly these headings:
+
+Diagnosis:
+Differential:
+Diagnostic justification:
+Uncertainty:
+
+Rules:
+- Focus only on diagnosis.
+- Do not provide treatment.
+- Do not provide drug doses.
+- Do not provide IPC, public-health, antimicrobial stewardship, source-control, or management plans.
+- Use syndrome, time course, host context, exposure, and key discriminators.
+- Keep the answer concise.
+
+Hidden Judge Prompt
+-------------------
+
+The judge is binary and diagnosis-only.
+
+Use:
+- hidden condition
+- expert_curriculum profile
+- generated patient case
+- doctor answer
+
+Judge output:
+
+{
+  "correct": 1 or 0,
+  "reflection": null if correct, otherwise one concise diagnostic lesson
+}
+
+Judging rules:
+- Mark correct if the answer gives the exact diagnosis, accepted synonym, or clinically acceptable subtype/parent match for this generated case.
+- Mark correct if the exact diagnosis is in the differential and the justification clearly tracks the correct syndrome and key discriminator.
+- Mark incorrect if the answer follows the intended diagnostic trap, misses the key exposure/host clue, or gives a diagnosis that would derail the case.
+- Do not judge treatment, IPC, public health, stewardship, source control, or management.
+- If incorrect, the reflection must identify the missed discriminator or wrong lookalike in one concise sentence.
+- Do not include hidden chain-of-thought.
+
+Retry Logic
+-----------
+
+If first answer is wrong:
+1. Take judge reflection as provisional_reflection.
+2. Retry the same patient once.
+3. Include previous answer and provisional_reflection.
+4. Judge retry.
+5. If retry correct:
+   - save successful case
+   - save reflection as validated
+6. If retry wrong:
+   - discard patient and reflection
+   - do not save patient text or failed answers
+
+Memory Records
+--------------
+
+successful_cases.jsonl must include:
+- successful_case_id
+- attempted_patient_id
+- condition_id
+- condition_name
+- training_lane
+- expert_value
+- patient_case
+- doctor_answer
+- solved_on
+- validated_reflection_used
+- expert_lesson
+- retrieval_tags
+
+validated_reflections.jsonl must include:
+- reflection_id
+- successful_case_id
+- attempted_patient_id
+- condition_id
+- condition_name
+- training_lane
+- failure_mode
+- reflection
+- validated_by
+- retrieval_tags
+
+discard_summary.jsonl must include metadata only:
+- attempted_patient_id
+- condition_id
+- condition_name
+- training_lane
+- reason
+
+Do not save failed patient case text.
+Do not save failed doctor answers.
+Do not save unvalidated reflections.
+
+Evaluation Summary
+------------------
+
+Write every --eval_every successful cases.
+
+Metrics:
+- successful_cases
+- attempted_patients
+- first_attempt_successes
+- retry_successes
+- qc_discarded_patients
+- retry_fail_discards
+- first_attempt_success_rate
+- retry_rescue_rate
+- discard_rate
+- coverage_by_training_lane
+- success_count_by_training_lane
+- retry_success_count_by_training_lane
+- discard_count_by_training_lane
+- must_not_miss_success_count
+- successful_case_memory_size
+- validated_reflection_memory_size
+
+Acceptance Criteria
+-------------------
+
+This command should run:
+
+python run_simulation.py \
+  --backend ollama \
+  --model qwen3.5:9b \
+  --kb_path data/infectious_diseases_seal_expert_rcl_kb_v6_compact.json \
+  --sampler_config data/expert_curriculum_sampler_config_v1.json \
+  --n_successful_cases 20 \
+  --eval_every 5 \
+  --run_name expert_diagnosis_rcl_viability
+
+Expected behaviour:
+- The loop reaches 20 successful diagnosis cases.
+- The sampler uses expert curriculum lanes rather than population prevalence.
+- Correct first attempts are saved.
+- Incorrect first attempts are retried once with a provisional reflection.
+- Reflections are saved only if they rescue the same patient.
+- Failed unrecovered patients are discarded.
+- Eval summaries include lane-level coverage and success/discard metrics.
+- The implementation does not change the working directory.

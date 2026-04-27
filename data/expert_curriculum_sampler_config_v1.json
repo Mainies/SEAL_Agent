@@ -1,0 +1,74 @@
+{
+  "title": "Expert Curriculum Sampler Config for Diagnosis-Only SEAL/RCL",
+  "schema_version": "1.0-expert-curriculum-minimal",
+  "purpose": "Minimal expert-oriented sampling configuration for the first loop viability smoke test.",
+  "not_prevalence_model": true,
+  "active_lanes_initial": {
+    "core_syndrome_reasoning": 0.3,
+    "high_consequence_must_not_miss": 0.2,
+    "travel_tropical_vector_zoonotic": 0.15,
+    "immunocompromised_or_healthcare_context": 0.15,
+    "common_infection_with_expert_trap": 0.1,
+    "lookalike_differential_discrimination": 0.1
+  },
+  "optional_lanes_later": [
+    "sti_blood_borne_reproductive",
+    "paediatric_perinatal_pregnancy",
+    "rare_tail_expert_recognition"
+  ],
+  "lane_definitions": {
+    "core_syndrome_reasoning": "Core ID syndrome recognition across fever, respiratory, GI, CNS, skin/soft tissue, urinary, and systemic presentations.",
+    "high_consequence_must_not_miss": "Time-critical or high-consequence infections where vague common diagnoses should not be accepted when red flags are present.",
+    "travel_tropical_vector_zoonotic": "Exposure-led reasoning for returned travellers, vector-borne, tropical, zoonotic, food/water, and environmental infections.",
+    "immunocompromised_or_healthcare_context": "Host-context reasoning for immunocompromised, device-related, opportunistic, and healthcare-associated infections.",
+    "common_infection_with_expert_trap": "Common presentations enriched with discriminators that prevent generic or overbroad diagnoses.",
+    "lookalike_differential_discrimination": "Cases designed to distinguish close infectious lookalikes."
+  },
+  "selection_algorithm": [
+    "Filter to conditions where seal_diagnosis_task.task_inclusion == include and expert_curriculum.initial_loop_use == enabled.",
+    "Weighted-sample one training lane from active_lanes_initial.",
+    "Within the lane, prefer conditions with expert_value high or medium, then conditions with fewer saved successes.",
+    "If no prior run coverage data are available, sample uniformly within the lane.",
+    "Do not use risk_groups == general_population as a prevalence weight."
+  ],
+  "memory_records": {
+    "successful_case_required_fields": [
+      "successful_case_id",
+      "attempted_patient_id",
+      "condition_id",
+      "condition_name",
+      "training_lane",
+      "expert_value",
+      "patient_case",
+      "doctor_answer",
+      "solved_on",
+      "validated_reflection_used",
+      "expert_lesson",
+      "retrieval_tags"
+    ],
+    "validated_reflection_required_fields": [
+      "reflection_id",
+      "successful_case_id",
+      "attempted_patient_id",
+      "condition_id",
+      "condition_name",
+      "training_lane",
+      "failure_mode",
+      "reflection",
+      "validated_by",
+      "retrieval_tags"
+    ]
+  },
+  "metrics": [
+    "successful_cases",
+    "attempted_patients",
+    "first_attempt_successes",
+    "retry_successes",
+    "discarded_patients",
+    "first_attempt_success_rate_by_lane",
+    "retry_rescue_rate_by_lane",
+    "discard_rate_by_lane",
+    "coverage_by_lane",
+    "coverage_of_must_not_miss_conditions"
+  ]
+}

@@ -1,0 +1,190 @@
+Codex Spec: Evaluate Diagnosis Questions With Knowledge Base and Case Experience
+
+Purpose
+-------
+
+Add a minimal evaluation runner that can answer a held-out diagnosis dataset using:
+1. the expert SEAL/RCL knowledge base,
+2. optional successful case memory,
+3. optional validated reflection memory.
+
+This is evaluation only. Do not write evaluation questions into training memory by default.
+
+Runtime Inputs
+--------------
+
+Required:
+- --eval_dataset data/id_expert_hard_eval_50.jsonl
+- --kb_path data/infectious_diseases_seal_expert_rcl_kb_v6_compact.json
+- --backend {ollama,hf}
+- --model <model name/path>
+- --run_name <name>
+
+Optional:
+- --successful_cases runs/<train_run>/successful_cases.jsonl
+- --validated_reflections runs/<train_run>/validated_reflections.jsonl
+- --eval_mode {no_memory,with_memory,kb_only,memory_only}
+- --n_success_memory default=5
+- --n_reflection_memory default=5
+- --temperature default=0.0
+- --max_tokens default=512
+- --allow_eval_learning default=false
+
+Working Directory Rule
+----------------------
+
+Assume the command is run from the intended project directory.
+Do not chdir or attempt to rediscover/reorient the project root.
+
+Evaluation Dataset Format
+-------------------------
+
+Each JSONL row contains:
+- question_id
+- question
+- choices
+- answer_letter
+- gold_diagnosis
+- accepted_answers
+- condition_id
+- expert_training_lane
+- expert_value
+- must_not_miss
+- key_discriminators
+- diagnostic_traps
+- lookalike_differentials
+- retrieval_tags
+
+Evaluation Prompt
+-----------------
+
+Build a concise diagnosis-only prompt.
+
+If eval_mode includes memory, retrieve case/reflection context and prepend it.
+
+Prompt template:
+
+You are an infectious diseases diagnosis expert.
+
+Use the provided case experience only if it is relevant.
+
+Prior successful cases and validated reflections:
+{memory_context}
+
+Question:
+{question}
+
+Task:
+Choose the single best diagnosis.
+
+Return exactly:
+Answer: <letter>
+Diagnosis: <diagnosis name>
+Justification: <one or two sentences>
+
+Rules:
+- Focus only on diagnosis.
+- Do not provide treatment, IPC, public-health, stewardship, or management.
+- Use syndrome, time course, host context, exposure, and key discriminators.
+- If options are provided, choose one option letter.
+
+Memory Retrieval
+----------------
+
+Implement simple memory retrieval first. No vector database.
+
+For each evaluation question:
+1. Use question["retrieval_tags"], question["expert_training_lane"], and question["condition_id"].
+2. Score each successful case/reflection by lexical overlap with its retrieval_tags, training_lane, condition_name, and expert_value.
+3. Return top-k successful cases and top-k validated reflections.
+4. If no tags are available, fall back to most recent memory records.
+
+Minimal scoring function:
+score = number of overlapping lowercased tokens/tags
+plus 2 if training_lane matches
+plus 2 if condition_id matches
+plus 1 if expert_value matches
+
+Evaluation Modes
+----------------
+
+no_memory:
+- Use only the question.
+- No case or reflection memory.
+
+with_memory:
+- Use retrieved successful cases and validated reflections.
+
+kb_only:
+- Use compact condition metadata for the question's condition_id, but no case memory.
+
+memory_only:
+- Use retrieved memories, but do not include hidden KB condition metadata.
+
+Default should be with_memory if memory files are supplied, otherwise no_memory.
+
+Important:
+- Do not expose gold_diagnosis or answer_letter to the model.
+- Do not include hidden condition metadata in no_memory or with_memory unless eval_mode == kb_only.
+
+Parsing Answers
+---------------
+
+Parse:
+- answer letter after "Answer:"
+- diagnosis after "Diagnosis:"
+
+Correct if:
+- predicted answer letter == answer_letter
+OR
+- predicted diagnosis string matches gold_diagnosis or any accepted_answers, case-insensitive
+
+For the first version, use deterministic parsing/string matching only.
+A hidden judge can be added later, but do not make it required for this minimal evaluation runner.
+
+Outputs
+-------
+
+Write to:
+
+runs/{run_name}/eval_results.jsonl
+runs/{run_name}/eval_summary.json
+
+Each eval_results row:
+{
+  "question_id": "...",
+  "expert_training_lane": "...",
+  "condition_id": "...",
+  "gold_diagnosis": "...",
+  "answer_letter": "...",
+  "model_raw_answer": "...",
+  "predicted_letter": "...",
+  "predicted_diagnosis": "...",
+  "correct": true,
+  "eval_mode": "with_memory",
+  "retrieved_success_case_ids": [],
+  "retrieved_reflection_ids": []
+}
+
+Summary:
+{
+  "n_questions": 50,
+  "accuracy": 0.0,
+  "accuracy_by_lane": {},
+  "accuracy_must_not_miss": 0.0,
+  "accuracy_non_must_not_miss": 0.0,
+  "eval_mode": "with_memory",
+  "n_success_memory": 5,
+  "n_reflection_memory": 5
+}
+
+Comparison Runs
+---------------
+
+Recommended viability comparisons:
+1. no_memory baseline
+2. with_memory after a small RCL training run
+3. kb_only diagnostic upper-context check
+4. memory_only ablation
+
+Do not allow evaluation items to update successful_cases.jsonl or validated_reflections.jsonl unless --allow_eval_learning true is explicitly set.
