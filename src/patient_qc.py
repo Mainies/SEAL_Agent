@@ -11,6 +11,8 @@ from src.utils import coerce_binary_flag, extract_json_object
 class PatientQCResult:
     usable: bool
     reason: str | None
+    raw_output: str | None = None
+    parse_error: str | None = None
 
 
 class PatientQC:
@@ -24,9 +26,17 @@ class PatientQC:
 
         prompt = build_patient_qc_prompt(condition=condition, patient_case=patient_case)
         response = self.backend.generate(prompt=prompt, max_tokens=160, temperature=0.0)
-        payload = extract_json_object(response)
-        usable = bool(coerce_binary_flag(payload.get("usable"), "usable"))
+        try:
+            payload = extract_json_object(response)
+            usable = bool(coerce_binary_flag(payload.get("usable"), "usable"))
+        except (TypeError, ValueError) as exc:
+            return PatientQCResult(
+                usable=False,
+                reason="malformed_patient_qc_output",
+                raw_output=response,
+                parse_error=str(exc),
+            )
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             reason = None
-        return PatientQCResult(usable=usable, reason=reason)
+        return PatientQCResult(usable=usable, reason=reason, raw_output=response)

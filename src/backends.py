@@ -73,6 +73,10 @@ class OllamaBackend:
         return text.strip()
 
 
+def strip_thinking_blocks(text: str) -> str:
+    return re.sub(r"<think>\s*.*?\s*</think>\s*", "", text, flags=re.DOTALL).strip()
+
+
 def configure_hf_environment() -> None:
     os.environ.setdefault("HF_HOME", "hf_cache")
     os.environ.setdefault("HF_HUB_CACHE", "hf_cache/hub")
@@ -85,18 +89,26 @@ def configure_hf_environment() -> None:
 class HuggingFaceBackend:
     model: str
     _tokenizer: object | None = field(default=None, init=False, repr=False)
+    _processor: object | None = field(default=None, init=False, repr=False)
     _model: object | None = field(default=None, init=False, repr=False)
     _torch: object | None = field(default=None, init=False, repr=False)
     _device: str = field(default="cpu", init=False, repr=False)
+    _uses_processor: bool = field(default=False, init=False, repr=False)
 
     def _lazy_load(self) -> None:
-        if self._model is not None and self._tokenizer is not None and self._torch is not None:
+        has_text_frontend = self._tokenizer is not None or self._processor is not None
+        if self._model is not None and has_text_frontend and self._torch is not None:
             return
 
         configure_hf_environment()
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import (
+                AutoConfig,
+                AutoModelForCausalLM,
+                AutoProcessor,
+                AutoTokenizer,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "HuggingFace backend requires torch and transformers to be installed."
@@ -109,10 +121,6 @@ class HuggingFaceBackend:
         else:
             self._device = "cpu"
 
-        tokenizer = AutoTokenizer.from_pretrained(self.model, trust_remote_code=True)
-        if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-
         model_kwargs: dict[str, object] = {
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
@@ -120,20 +128,47 @@ class HuggingFaceBackend:
         if self._device == "cuda":
             model_kwargs["device_map"] = "auto"
             if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
-                model_kwargs["torch_dtype"] = torch.bfloat16
+                model_kwargs["dtype"] = torch.bfloat16
             else:
-                model_kwargs["torch_dtype"] = torch.float16
+                model_kwargs["dtype"] = torch.float16
         elif self._device == "mps":
-            model_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["dtype"] = torch.float16
         else:
-            model_kwargs["torch_dtype"] = torch.float32
+            model_kwargs["dtype"] = torch.float32
 
-        model = AutoModelForCausalLM.from_pretrained(self.model, **model_kwargs)
+        config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
+        architectures = set(getattr(config, "architectures", []) or [])
+        is_qwen35_conditional = (
+            "Qwen3_5ForConditionalGeneration" in architectures
+            or getattr(config, "model_type", None) == "qwen3_5"
+        )
+        if is_qwen35_conditional:
+            try:
+                from transformers import Qwen3_5ForConditionalGeneration
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Qwen3.6 requires transformers with Qwen3_5ForConditionalGeneration "
+                    "support. Install requirements-hf.txt, which pins transformers>=4.57.1."
+                ) from exc
+            processor = AutoProcessor.from_pretrained(self.model, trust_remote_code=True)
+            model = Qwen3_5ForConditionalGeneration.from_pretrained(
+                self.model,
+                **model_kwargs,
+            )
+            self._processor = processor
+            self._uses_processor = True
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.model, trust_remote_code=True)
+            if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model = AutoModelForCausalLM.from_pretrained(self.model, **model_kwargs)
+            self._tokenizer = tokenizer
+            self._uses_processor = False
+
         if self._device != "cpu" and self._device != "cuda":
             model.to(self._device)
         model.eval()
 
-        self._tokenizer = tokenizer
         self._model = model
         self._torch = torch
 
@@ -144,14 +179,56 @@ class HuggingFaceBackend:
         temperature: float | None = None,
     ) -> str:
         self._lazy_load()
-        assert self._tokenizer is not None
         assert self._model is not None
         assert self._torch is not None
 
-        tokenizer = self._tokenizer
         model = self._model
         torch = self._torch
+        generation_temperature = 0.0 if temperature is None else temperature
+        do_sample = generation_temperature > 0
 
+        if self._uses_processor:
+            assert self._processor is not None
+            processor = self._processor
+            messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            try:
+                inputs = processor.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                    return_dict=True,
+                    return_tensors="pt",
+                )
+            except TypeError:
+                inputs = processor.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                )
+            inputs = inputs.to(model.device)
+            generation_kwargs = {
+                "max_new_tokens": max_tokens or 768,
+                "do_sample": do_sample,
+            }
+            if do_sample:
+                generation_kwargs["temperature"] = generation_temperature
+            with torch.inference_mode():
+                output = model.generate(**inputs, **generation_kwargs)
+
+            prompt_tokens = inputs["input_ids"].shape[-1]
+            generated_tokens = output[:, prompt_tokens:]
+            decoded = processor.batch_decode(
+                generated_tokens,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+            return strip_thinking_blocks(decoded)
+
+        assert self._tokenizer is not None
+        tokenizer = self._tokenizer
         messages = [{"role": "user", "content": prompt}]
         if hasattr(tokenizer, "apply_chat_template"):
             try:
@@ -173,8 +250,6 @@ class HuggingFaceBackend:
         inputs = tokenizer(rendered_prompt, return_tensors="pt")
         inputs = {name: tensor.to(self._device) for name, tensor in inputs.items()}
 
-        generation_temperature = 0.0 if temperature is None else temperature
-        do_sample = generation_temperature > 0
         generation_kwargs = {
             "max_new_tokens": max_tokens or 768,
             "do_sample": do_sample,
@@ -193,5 +268,4 @@ class HuggingFaceBackend:
         prompt_tokens = inputs["input_ids"].shape[-1]
         generated_tokens = output[0][prompt_tokens:]
         decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
-        decoded = re.sub(r"<think>\s*.*?\s*</think>\s*", "", decoded, flags=re.DOTALL)
-        return decoded.strip()
+        return strip_thinking_blocks(decoded)

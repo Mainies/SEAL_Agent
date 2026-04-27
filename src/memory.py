@@ -115,6 +115,7 @@ class MemoryStore:
         condition: dict[str, Any],
         training_lane: str,
         reason: str,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         record = {
             "attempted_patient_id": attempted_patient_id,
@@ -123,6 +124,8 @@ class MemoryStore:
             "training_lane": training_lane,
             "reason": reason,
         }
+        if details:
+            record["details"] = details
         self.discards.append(record)
         append_jsonl(self.discard_path, record)
         return record

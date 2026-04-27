@@ -141,6 +141,14 @@ class SimulationLoop:
                     condition=condition,
                     training_lane=training_lane,
                     reason=f"qc_discard:{reason}",
+                    details=(
+                        {
+                            "patient_qc_parse_error": qc_result.parse_error,
+                            "patient_qc_raw_output": qc_result.raw_output,
+                        }
+                        if qc_result.parse_error
+                        else None
+                    ),
                 )
                 self._log(
                     f"[{attempted_patient_id}] discard"
@@ -190,15 +198,28 @@ class SimulationLoop:
                     self.no_reflection_count += 1
                     self.retry_fail_discards += 1
                     self.discard_count_by_training_lane[training_lane] += 1
+                    discard_reason = (
+                        "malformed_judge_output"
+                        if first_judgment.parse_error
+                        else "retry_failed:no_reflection"
+                    )
                     self.memory.record_discard(
                         attempted_patient_id=attempted_patient_id,
                         condition=condition,
                         training_lane=training_lane,
-                        reason="retry_failed:no_reflection",
+                        reason=discard_reason,
+                        details=(
+                            {
+                                "judge_parse_error": first_judgment.parse_error,
+                                "judge_raw_output": first_judgment.raw_output,
+                            }
+                            if first_judgment.parse_error
+                            else None
+                        ),
                     )
                     self._log(
                         f"[{attempted_patient_id}] discard"
-                        " | reason=retry_failed:no_reflection"
+                        f" | reason={discard_reason}"
                     )
                     self._maybe_run_periodic_evaluation()
                     continue
@@ -251,15 +272,28 @@ class SimulationLoop:
                     self.failed_reflection_count += 1
                     self.retry_fail_discards += 1
                     self.discard_count_by_training_lane[training_lane] += 1
+                    discard_reason = (
+                        "retry_failed:malformed_judge_output"
+                        if retry_judgment.parse_error
+                        else "retry_failed:unrecovered"
+                    )
                     self.memory.record_discard(
                         attempted_patient_id=attempted_patient_id,
                         condition=condition,
                         training_lane=training_lane,
-                        reason="retry_failed:unrecovered",
+                        reason=discard_reason,
+                        details=(
+                            {
+                                "judge_parse_error": retry_judgment.parse_error,
+                                "judge_raw_output": retry_judgment.raw_output,
+                            }
+                            if retry_judgment.parse_error
+                            else None
+                        ),
                     )
                     self._log(
                         f"[{attempted_patient_id}] discard"
-                        " | reason=retry_failed:unrecovered"
+                        f" | reason={discard_reason}"
                     )
 
             self._maybe_run_periodic_evaluation()

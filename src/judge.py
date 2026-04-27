@@ -12,6 +12,7 @@ class JudgeResult:
     correct: bool
     reflection: str | None
     raw_output: str
+    parse_error: str | None = None
 
 
 class DiagnosisJudge:
@@ -30,8 +31,16 @@ class DiagnosisJudge:
             doctor_answer=doctor_answer,
         )
         response = self.backend.generate(prompt=prompt, max_tokens=220, temperature=0.0)
-        payload = extract_json_object(response)
-        correct = bool(coerce_binary_flag(payload.get("correct"), "correct"))
+        try:
+            payload = extract_json_object(response)
+            correct = bool(coerce_binary_flag(payload.get("correct"), "correct"))
+        except (TypeError, ValueError) as exc:
+            return JudgeResult(
+                correct=False,
+                reflection=None,
+                raw_output=response,
+                parse_error=str(exc),
+            )
         reflection = payload.get("reflection")
         if correct:
             reflection = None
