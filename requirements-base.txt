@@ -1,0 +1,3 @@
+# Common Python dependencies for SEAL_AGENTS.
+# The current Ollama-only runtime is stdlib-only, so shared packages can be
+# added here over time without changing the setup script shape.

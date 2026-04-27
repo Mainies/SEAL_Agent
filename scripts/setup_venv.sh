@@ -4,10 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 VENV_DIR="${ROOT_DIR}/.venv"
+REQ_FILE="${REQ_FILE:-requirements-hf.txt}"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "Required interpreter not found: ${PYTHON_BIN}" >&2
   echo "Set PYTHON_BIN=... if you want to use a different Python." >&2
+  exit 1
+fi
+
+if [[ ! -f "${ROOT_DIR}/${REQ_FILE}" ]]; then
+  echo "Requirements file not found: ${ROOT_DIR}/${REQ_FILE}" >&2
   exit 1
 fi
 
@@ -18,16 +24,7 @@ source "${VENV_DIR}/bin/activate"
 
 python -m pip install --upgrade pip setuptools wheel
 
-# Qwen3.6 requires the latest transformers according to the official model card.
-python -m pip install --upgrade \
-  "torch>=2.7" \
-  "transformers[serving]" \
-  "accelerate>=1.10" \
-  "safetensors>=0.6" \
-  "sentencepiece>=0.2" \
-  "huggingface_hub>=0.34" \
-  "torchvision" \
-  "pillow"
+python -m pip install --upgrade -r "${ROOT_DIR}/${REQ_FILE}"
 
 mkdir -p \
   "${ROOT_DIR}/hf_cache" \
@@ -48,5 +45,8 @@ cat <<EOF
 Created virtual environment: ${VENV_DIR}
 Activate it with:
   source "${VENV_DIR}/bin/activate"
+
+Installed requirements from:
+  ${ROOT_DIR}/${REQ_FILE}
 
 EOF

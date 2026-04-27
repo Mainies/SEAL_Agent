@@ -1,0 +1,11 @@
+-r requirements-base.txt
+
+# Qwen3.6's model card recommends the latest Transformers stack for HF usage.
+accelerate>=1.10
+huggingface_hub>=0.34
+pillow
+safetensors>=0.6
+sentencepiece>=0.2
+torch>=2.7
+torchvision
+transformers[serving]
