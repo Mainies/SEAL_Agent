@@ -59,8 +59,13 @@ Rules:
 - Do not reveal the pathogen name.
 - Do not reveal the condition ID.
 - Include age, sex, chief complaint, symptom timeline, relevant exposure or host factor, relevant negatives, and basic objective clues.
+- Because this is the diagnosis task, include enough already-available examination, laboratory, imaging, microbiology, pathology, or other test results to support a diagnosis when they are relevant.
+- Supportive test results may be specific, but they must not explicitly name the hidden disease, pathogen, or condition ID.
+- Do not write meta-instructions to the doctor, such as "the team must distinguish" or "this points toward".
+- Finish the vignette as a complete clinical note; do not end mid-sentence or with an unfinished diagnostic phrase.
 - Include at least one key discriminator from the expert profile when possible.
 - If lookalike differentials are listed, create a case where the gold diagnosis is distinguishable but not artificially obvious.
+- Keep it focused and clinically dense; concise is better than exhaustive.
 - Return plain text only.
 """
 
@@ -86,6 +91,12 @@ Mark unusable if:
 - the vignette is unrelated to the condition
 - the vignette lacks enough diagnostic information
 - the vignette contradicts the key host or exposure context
+- the vignette ends mid-sentence or contains an unfinished phrase that implies the hidden answer
+
+Do not mark unusable merely because the case includes supportive examination, laboratory,
+imaging, microbiology, pathology, or other test results. In the diagnosis task, those
+results are expected. Supportive results are only leakage if they explicitly name the
+hidden disease, pathogen, or condition ID.
 
 Return JSON only:
 {{

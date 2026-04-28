@@ -50,6 +50,7 @@ class EvaluationConfig:
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     temperature: float = 0.0
     max_tokens: int = 512
+    eval_limit: int | None = None
     allow_eval_learning: bool = False
     runs_root: str = "runs"
     output_dir: str | None = None
@@ -88,7 +89,12 @@ class EvaluationRunner:
     ) -> None:
         self.backend = backend
         self.config = config
-        self.questions = load_evaluation_dataset(config.eval_dataset)
+        loaded_questions = load_evaluation_dataset(config.eval_dataset)
+        self.questions = (
+            loaded_questions[: config.eval_limit]
+            if config.eval_limit is not None
+            else loaded_questions
+        )
         self.condition_index = load_condition_index(config.kb_path)
         self.successful_cases = self._prepare_records(
             successful_case_records
@@ -138,10 +144,12 @@ class EvaluationRunner:
             self.metadata_path,
             {
                 **asdict(config),
+                "task_type": "diagnosis",
                 "resolved_eval_mode": self.eval_mode,
                 "n_loaded_successful_cases": len(self.successful_cases),
                 "n_loaded_validated_reflections": len(self.validated_reflections),
                 "n_questions": len(self.questions),
+                "n_available_questions": len(loaded_questions),
             },
         )
 
@@ -207,6 +215,7 @@ class EvaluationRunner:
 
             result = {
                 "question_id": question.get("question_id"),
+                "task_type": "diagnosis",
                 "expert_training_lane": lane,
                 "condition_id": question.get("condition_id"),
                 "gold_diagnosis": question.get("gold_diagnosis"),
@@ -235,6 +244,7 @@ class EvaluationRunner:
             )
 
         summary = {
+            "task_type": "diagnosis",
             "n_questions": len(self.questions),
             "accuracy": safe_rate(correct_total, len(self.questions)),
             "accuracy_by_lane": {
@@ -276,6 +286,7 @@ class EvaluationRunner:
         prepared: list[dict[str, Any]] = []
         for index, record in enumerate(records):
             normalized = dict(record)
+            normalized.setdefault("task_type", "diagnosis")
             normalized["_record_index"] = index
             normalized["retrieval_tags"] = unique_strings(normalized.get("retrieval_tags", []))
             prepared.append(normalized)

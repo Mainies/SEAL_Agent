@@ -34,6 +34,7 @@ class SimulationConfig:
     run_evaluation: bool = False
     eval_dataset: str | None = None
     eval_mode: str | None = None
+    eval_limit: int | None = None
     eval_success_milestones: tuple[int, ...] = ()
     allow_eval_learning: bool = False
     log_every: int = 1
@@ -72,6 +73,7 @@ class SimulationLoop:
             run_name=config.run_name,
             config_snapshot={
                 **asdict(config),
+                "task_type": "diagnosis",
                 "filtered_condition_count": len(self.conditions),
             },
             retrieval_mode=config.retrieval_mode,
@@ -509,6 +511,7 @@ class SimulationLoop:
                 embedding_batch_size=self.config.embedding_batch_size,
                 temperature=0.0,
                 max_tokens=min(self.config.max_tokens, 512),
+                eval_limit=self.config.eval_limit,
                 allow_eval_learning=self.config.allow_eval_learning,
                 output_dir=str(output_dir or self.memory.run_dir),
                 quiet=self.config.quiet,

@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 hf_cache/
 runs/
+smoke_tests/

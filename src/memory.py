@@ -101,6 +101,7 @@ class MemoryStore:
         record = {
             "successful_case_id": f"success_{self._success_counter:06d}",
             "attempted_patient_id": attempted_patient_id,
+            "task_type": "diagnosis",
             "condition_id": condition["condition_id"],
             "condition_name": condition["condition_name"],
             "training_lane": training_lane,
@@ -139,6 +140,7 @@ class MemoryStore:
             "reflection_id": f"reflection_{self._reflection_counter:06d}",
             "successful_case_id": successful_case_id,
             "attempted_patient_id": attempted_patient_id,
+            "task_type": "diagnosis",
             "condition_id": condition["condition_id"],
             "condition_name": condition["condition_name"],
             "training_lane": training_lane,
@@ -168,6 +170,7 @@ class MemoryStore:
     ) -> dict[str, Any]:
         record = {
             "attempted_patient_id": attempted_patient_id,
+            "task_type": "diagnosis",
             "condition_id": condition["condition_id"],
             "condition_name": condition["condition_name"],
             "training_lane": training_lane,
@@ -303,6 +306,7 @@ class MemoryStore:
             for lane, condition_ids in coverage_by_training_lane.items()
         }
         return {
+            "task_type": "diagnosis",
             "written_at": iso_now(),
             "successful_cases": successful_cases,
             "attempted_patients": attempted_patients,
