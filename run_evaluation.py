@@ -5,6 +5,12 @@ from typing import Any
 
 from src.backends import HuggingFaceBackend, OllamaBackend
 from src.evaluation import EvaluationConfig, EvaluationRunner
+from src.semantic_retrieval import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DEVICE,
+    DEFAULT_EMBEDDING_MODEL,
+    RETRIEVAL_MODES,
+)
 
 
 def positive_int(value: str) -> int:
@@ -27,8 +33,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--successful_cases")
     parser.add_argument("--validated_reflections")
     parser.add_argument("--eval_mode", choices=["no_memory", "with_memory", "kb_only", "memory_only"])
-    parser.add_argument("--n_success_memory", type=positive_int, default=5)
-    parser.add_argument("--n_reflection_memory", type=positive_int, default=5)
+    parser.add_argument("--n_success_memory", type=positive_int, default=3)
+    parser.add_argument("--n_reflection_memory", type=positive_int, default=4)
+    parser.add_argument(
+        "--retrieval_mode",
+        choices=sorted(RETRIEVAL_MODES),
+        default="semantic",
+        help="Memory retrieval mode: semantic cosine retrieval or legacy tag overlap.",
+    )
+    parser.add_argument("--embedding_model", default=DEFAULT_EMBEDDING_MODEL)
+    parser.add_argument("--embedding_device", default=DEFAULT_EMBEDDING_DEVICE)
+    parser.add_argument(
+        "--embedding_batch_size",
+        type=positive_int,
+        default=DEFAULT_EMBEDDING_BATCH_SIZE,
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max_tokens", type=positive_int, default=512)
     parser.add_argument("--allow_eval_learning", action="store_true")
@@ -60,6 +79,10 @@ def main() -> None:
         eval_mode=args.eval_mode,
         n_success_memory=args.n_success_memory,
         n_reflection_memory=args.n_reflection_memory,
+        retrieval_mode=args.retrieval_mode,
+        embedding_model=args.embedding_model,
+        embedding_device=args.embedding_device,
+        embedding_batch_size=args.embedding_batch_size,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
         allow_eval_learning=args.allow_eval_learning,

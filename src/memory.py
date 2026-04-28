@@ -14,6 +14,17 @@ from src.utils import (
     unique_strings,
     write_json,
 )
+from src.semantic_retrieval import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DEVICE,
+    DEFAULT_EMBEDDING_MODEL,
+    RETRIEVAL_MODES,
+    LocalTextEmbedder,
+    SemanticRecordIndex,
+    case_retrieval_text,
+    embedding_config_from_env,
+    experience_retrieval_text,
+)
 
 
 class MemoryStore:
@@ -22,7 +33,15 @@ class MemoryStore:
         runs_root: str,
         run_name: str,
         config_snapshot: dict[str, Any],
+        retrieval_mode: str = "semantic",
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
+        embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     ) -> None:
+        if retrieval_mode not in RETRIEVAL_MODES:
+            raise ValueError(f"Unsupported retrieval_mode: {retrieval_mode}")
+        self.retrieval_mode = retrieval_mode
+
         run_directory_name = f"{now_timestamp()}_{slugify(run_name)}"
         self.run_dir = Path(runs_root) / run_directory_name
         self.run_dir.mkdir(parents=True, exist_ok=False)
@@ -31,6 +50,7 @@ class MemoryStore:
         self.reflection_path = self.run_dir / "validated_reflections.jsonl"
         self.discard_path = self.run_dir / "discard_summary.jsonl"
         self.eval_summary_path = self.run_dir / "eval_summaries.jsonl"
+        self.heldout_eval_summary_path = self.run_dir / "heldout_eval_summaries.jsonl"
         self.final_summary_path = self.run_dir / "final_summary.json"
         self.metadata_path = self.run_dir / "run_metadata.json"
 
@@ -38,17 +58,34 @@ class MemoryStore:
         self.validated_reflections: list[dict[str, Any]] = []
         self.discards: list[dict[str, Any]] = []
         self.eval_summaries: list[dict[str, Any]] = []
+        self.heldout_eval_summaries: list[dict[str, Any]] = []
 
         self._success_counter = 0
         self._reflection_counter = 0
+        self._success_counts_by_condition: dict[str, int] = {}
+        self._success_index: SemanticRecordIndex | None = None
+        self._reflection_index: SemanticRecordIndex | None = None
+        if self.retrieval_mode == "semantic":
+            embedding_config = embedding_config_from_env(
+                model=embedding_model,
+                device=embedding_device,
+                batch_size=embedding_batch_size,
+            )
+            embedder = LocalTextEmbedder(embedding_config)
+            self._success_index = SemanticRecordIndex(
+                records=self.successful_cases,
+                embedder=embedder,
+                text_builder=case_retrieval_text,
+            )
+            self._reflection_index = SemanticRecordIndex(
+                records=self.validated_reflections,
+                embedder=embedder,
+                text_builder=experience_retrieval_text,
+            )
         write_json(self.metadata_path, config_snapshot)
 
     def success_counts_by_condition(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for record in self.successful_cases:
-            condition_id = record["condition_id"]
-            counts[condition_id] = counts.get(condition_id, 0) + 1
-        return counts
+        return dict(self._success_counts_by_condition)
 
     def record_success(
         self,
@@ -69,6 +106,7 @@ class MemoryStore:
             "training_lane": training_lane,
             "expert_value": condition.get("expert_curriculum", {}).get("expert_value"),
             "patient_case": patient_case,
+            "retrieval_text": patient_case,
             "doctor_answer": doctor_answer,
             "solved_on": solved_on,
             "validated_reflection_used": validated_reflection_used,
@@ -77,7 +115,13 @@ class MemoryStore:
                 condition.get("expert_curriculum", {}).get("retrieval_tags", [])
             ),
         }
+        condition_id = record["condition_id"]
+        self._success_counts_by_condition[condition_id] = (
+            self._success_counts_by_condition.get(condition_id, 0) + 1
+        )
         self.successful_cases.append(record)
+        if self._success_index is not None:
+            self._success_index.add(record)
         append_jsonl(self.success_path, record)
         return record
 
@@ -87,6 +131,7 @@ class MemoryStore:
         attempted_patient_id: str,
         condition: dict[str, Any],
         training_lane: str,
+        patient_case: str,
         reflection: str,
     ) -> dict[str, Any]:
         self._reflection_counter += 1
@@ -98,6 +143,8 @@ class MemoryStore:
             "condition_name": condition["condition_name"],
             "training_lane": training_lane,
             "expert_value": condition.get("expert_curriculum", {}).get("expert_value"),
+            "patient_case": patient_case,
+            "retrieval_text": patient_case,
             "failure_mode": classify_failure_mode(reflection),
             "reflection": reflection,
             "validated_by": "same_patient_retry",
@@ -106,6 +153,8 @@ class MemoryStore:
             ),
         }
         self.validated_reflections.append(record)
+        if self._reflection_index is not None:
+            self._reflection_index.add(record)
         append_jsonl(self.reflection_path, record)
         return record
 
@@ -134,21 +183,40 @@ class MemoryStore:
         self,
         condition: dict[str, Any],
         training_lane: str,
+        patient_case: str,
         n_success_memory: int,
         n_reflection_memory: int,
     ) -> str:
-        success_records = self._retrieve_records(
-            records=self.successful_cases,
-            target_tags=condition.get("expert_curriculum", {}).get("retrieval_tags", []),
-            training_lane=training_lane,
-            limit=n_success_memory,
-        )
-        reflection_records = self._retrieve_records(
-            records=self.validated_reflections,
-            target_tags=condition.get("expert_curriculum", {}).get("retrieval_tags", []),
-            training_lane=training_lane,
-            limit=n_reflection_memory,
-        )
+        if (
+            self.retrieval_mode == "semantic"
+            and patient_case.strip()
+            and (self.successful_cases or self.validated_reflections)
+            and self._success_index is not None
+        ):
+            query_embedding = self._success_index.embedder.encode([patient_case])
+            success_records = (
+                self._success_index.search_embedding(query_embedding, n_success_memory)
+                if self.successful_cases
+                else []
+            )
+            reflection_records = (
+                self._reflection_index.search_embedding(query_embedding, n_reflection_memory)
+                if self.validated_reflections and self._reflection_index is not None
+                else []
+            )
+        else:
+            success_records = self._retrieve_records(
+                records=self.successful_cases,
+                target_tags=condition.get("expert_curriculum", {}).get("retrieval_tags", []),
+                training_lane=training_lane,
+                limit=n_success_memory,
+            )
+            reflection_records = self._retrieve_records(
+                records=self.validated_reflections,
+                target_tags=condition.get("expert_curriculum", {}).get("retrieval_tags", []),
+                training_lane=training_lane,
+                limit=n_reflection_memory,
+            )
 
         if not success_records and not reflection_records:
             return "No previous successful cases or validated reflections available."
@@ -192,6 +260,18 @@ class MemoryStore:
     def append_eval_summary(self, summary: dict[str, Any]) -> None:
         self.eval_summaries.append(summary)
         append_jsonl(self.eval_summary_path, summary)
+
+    def append_heldout_eval_summary(self, summary: dict[str, Any]) -> None:
+        self.heldout_eval_summaries.append(summary)
+        append_jsonl(self.heldout_eval_summary_path, summary)
+
+    @property
+    def success_index(self) -> SemanticRecordIndex | None:
+        return self._success_index
+
+    @property
+    def reflection_index(self) -> SemanticRecordIndex | None:
+        return self._reflection_index
 
     def write_final_summary(self, summary: dict[str, Any]) -> None:
         write_json(self.final_summary_path, summary)

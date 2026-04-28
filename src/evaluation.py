@@ -7,6 +7,17 @@ from typing import Any
 
 from src.kb import load_condition_index
 from src.prompts import build_eval_kb_context, build_eval_prompt
+from src.semantic_retrieval import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DEVICE,
+    DEFAULT_EMBEDDING_MODEL,
+    RETRIEVAL_MODES,
+    LocalTextEmbedder,
+    SemanticRecordIndex,
+    case_retrieval_text,
+    embedding_config_from_env,
+    experience_retrieval_text,
+)
 from src.utils import (
     append_jsonl,
     ensure_file_exists,
@@ -31,8 +42,12 @@ class EvaluationConfig:
     successful_cases: str | None = None
     validated_reflections: str | None = None
     eval_mode: str | None = None
-    n_success_memory: int = 5
-    n_reflection_memory: int = 5
+    n_success_memory: int = 3
+    n_reflection_memory: int = 4
+    retrieval_mode: str = "semantic"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_device: str = DEFAULT_EMBEDDING_DEVICE
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     temperature: float = 0.0
     max_tokens: int = 512
     allow_eval_learning: bool = False
@@ -68,6 +83,8 @@ class EvaluationRunner:
         config: EvaluationConfig,
         successful_case_records: list[dict[str, Any]] | None = None,
         validated_reflection_records: list[dict[str, Any]] | None = None,
+        successful_case_index: SemanticRecordIndex | None = None,
+        validated_reflection_index: SemanticRecordIndex | None = None,
     ) -> None:
         self.backend = backend
         self.config = config
@@ -83,7 +100,33 @@ class EvaluationRunner:
             if validated_reflection_records is not None
             else self._load_optional_jsonl(config.validated_reflections)
         )
+        if config.retrieval_mode not in RETRIEVAL_MODES:
+            raise ValueError(f"Unsupported retrieval_mode: {config.retrieval_mode}")
         self.eval_mode = self._resolve_eval_mode(config.eval_mode)
+        self.success_index: SemanticRecordIndex | None = None
+        self.reflection_index: SemanticRecordIndex | None = None
+        if config.retrieval_mode == "semantic" and (
+            successful_case_index is not None or validated_reflection_index is not None
+        ):
+            self.success_index = successful_case_index
+            self.reflection_index = validated_reflection_index
+        elif config.retrieval_mode == "semantic":
+            embedding_config = embedding_config_from_env(
+                model=config.embedding_model,
+                device=config.embedding_device,
+                batch_size=config.embedding_batch_size,
+            )
+            embedder = LocalTextEmbedder(embedding_config)
+            self.success_index = SemanticRecordIndex(
+                records=self.successful_cases,
+                embedder=embedder,
+                text_builder=case_retrieval_text,
+            )
+            self.reflection_index = SemanticRecordIndex(
+                records=self.validated_reflections,
+                embedder=embedder,
+                text_builder=experience_retrieval_text,
+            )
 
         output_dir = Path(config.output_dir) if config.output_dir else Path(config.runs_root) / config.run_name
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +145,11 @@ class EvaluationRunner:
             },
         )
 
-    def run(self, trigger_attempted_patients: int | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        trigger_attempted_patients: int | None = None,
+        trigger_successful_cases: int | None = None,
+    ) -> dict[str, Any]:
         if self.results_path.exists():
             self.results_path.unlink()
 
@@ -206,9 +253,13 @@ class EvaluationRunner:
             "n_loaded_successful_cases": len(self.successful_cases),
             "n_loaded_validated_reflections": len(self.validated_reflections),
             "allow_eval_learning": self.config.allow_eval_learning,
+            "retrieval_mode": self.config.retrieval_mode,
+            "embedding_model": self.config.embedding_model,
         }
         if trigger_attempted_patients is not None:
             summary["trigger_attempted_patients"] = trigger_attempted_patients
+        if trigger_successful_cases is not None:
+            summary["trigger_successful_cases"] = trigger_successful_cases
 
         write_json(self.summary_path, summary)
         self._log(
@@ -244,6 +295,36 @@ class EvaluationRunner:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if self.eval_mode in {"no_memory", "kb_only"}:
             return [], []
+        if self.config.retrieval_mode == "semantic" and (
+            self.success_index is not None or self.reflection_index is not None
+        ):
+            query_text = str(question.get("question", "")).strip()
+            if not query_text:
+                return [], []
+            embedder = (
+                self.success_index.embedder
+                if self.success_index is not None
+                else self.reflection_index.embedder
+            )
+            query_embedding = embedder.encode([query_text])
+            success_records = (
+                self.success_index.search_embedding(
+                    query_embedding,
+                    self.config.n_success_memory,
+                )
+                if self.successful_cases and self.success_index is not None
+                else []
+            )
+            reflection_records = (
+                self.reflection_index.search_embedding(
+                    query_embedding,
+                    self.config.n_reflection_memory,
+                )
+                if self.validated_reflections and self.reflection_index is not None
+                else []
+            )
+            return success_records, reflection_records
+
         success_records = self._top_k_records(
             question=question,
             records=self.successful_cases,

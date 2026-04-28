@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from src.evaluation import EvaluationConfig, EvaluationRunner
@@ -12,6 +13,11 @@ from src.memory import MemoryStore
 from src.patient_qc import PatientQC
 from src.prompts import build_doctor_prompt, build_patient_generation_prompt
 from src.sampler import ExpertCurriculumSampler
+from src.semantic_retrieval import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DEVICE,
+    DEFAULT_EMBEDDING_MODEL,
+)
 
 MAX_ATTEMPT_MULTIPLIER = 50
 
@@ -28,14 +34,20 @@ class SimulationConfig:
     run_evaluation: bool = False
     eval_dataset: str | None = None
     eval_mode: str | None = None
+    eval_success_milestones: tuple[int, ...] = ()
     allow_eval_learning: bool = False
     log_every: int = 1
+    verbose_events: bool = False
     quiet: bool = False
     temperature: float = 0.2
     max_tokens: int = 768
     seed: int = 17
-    n_success_memory: int = 5
-    n_reflection_memory: int = 5
+    n_success_memory: int = 3
+    n_reflection_memory: int = 4
+    retrieval_mode: str = "semantic"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_device: str = DEFAULT_EMBEDDING_DEVICE
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     ollama_host: str = "http://localhost:11434"
     patient_qc: bool = False
     runs_root: str = "runs"
@@ -62,6 +74,10 @@ class SimulationLoop:
                 **asdict(config),
                 "filtered_condition_count": len(self.conditions),
             },
+            retrieval_mode=config.retrieval_mode,
+            embedding_model=config.embedding_model,
+            embedding_device=config.embedding_device,
+            embedding_batch_size=config.embedding_batch_size,
         )
 
         self.successful_cases = 0
@@ -82,6 +98,16 @@ class SimulationLoop:
         self.retry_success_count_by_training_lane: dict[str, int] = defaultdict(int)
         self.discard_count_by_training_lane: dict[str, int] = defaultdict(int)
         self.coverage_by_training_lane: dict[str, set[str]] = defaultdict(set)
+        self.eval_success_milestones = tuple(
+            sorted(
+                {
+                    milestone
+                    for milestone in config.eval_success_milestones
+                    if 0 < milestone <= config.n_successful_cases
+                }
+            )
+        )
+        self.completed_success_eval_milestones: set[int] = set()
 
     def run(self) -> dict[str, Any]:
         max_attempts = max(
@@ -108,7 +134,7 @@ class SimulationLoop:
             training_lane = sampled.training_lane
 
             attempted_patient_id = f"patient_{self.attempted_patients + 1:06d}"
-            self._log(
+            self._log_event(
                 f"[{attempted_patient_id}] sampling"
                 f" | lane={training_lane}"
                 f" | condition={condition['condition_name']}"
@@ -124,7 +150,7 @@ class SimulationLoop:
                     training_lane=training_lane,
                     reason="patient_generation_empty",
                 )
-                self._log(
+                self._log_event(
                     f"[{attempted_patient_id}] discard"
                     " | reason=patient_generation_empty"
                 )
@@ -150,7 +176,7 @@ class SimulationLoop:
                         else None
                     ),
                 )
-                self._log(
+                self._log_event(
                     f"[{attempted_patient_id}] discard"
                     f" | reason=qc_discard:{reason}"
                 )
@@ -160,6 +186,7 @@ class SimulationLoop:
             memory_context = self.memory.build_memory_context(
                 condition=condition,
                 training_lane=training_lane,
+                patient_case=patient_case,
                 n_success_memory=self.config.n_success_memory,
                 n_reflection_memory=self.config.n_reflection_memory,
             )
@@ -187,7 +214,7 @@ class SimulationLoop:
                     solved_on="first_attempt",
                     validated_reflection_used=None,
                 )
-                self._log(
+                self._log_event(
                     f"[{attempted_patient_id}] success"
                     " | solved_on=first_attempt"
                     f" | condition={condition['condition_name']}"
@@ -217,7 +244,7 @@ class SimulationLoop:
                             else None
                         ),
                     )
-                    self._log(
+                    self._log_event(
                         f"[{attempted_patient_id}] discard"
                         f" | reason={discard_reason}"
                     )
@@ -225,7 +252,7 @@ class SimulationLoop:
                     continue
 
                 self.reflections_emitted_count += 1
-                self._log(
+                self._log_event(
                     f"[{attempted_patient_id}] retrying"
                     f" | reflection={first_judgment.reflection}"
                 )
@@ -260,10 +287,11 @@ class SimulationLoop:
                         attempted_patient_id=attempted_patient_id,
                         condition=condition,
                         training_lane=training_lane,
+                        patient_case=patient_case,
                         reflection=first_judgment.reflection,
                     )
                     self.validated_reflection_count += 1
-                    self._log(
+                    self._log_event(
                         f"[{attempted_patient_id}] success"
                         " | solved_on=retry"
                         f" | condition={condition['condition_name']}"
@@ -291,7 +319,7 @@ class SimulationLoop:
                             else None
                         ),
                     )
-                    self._log(
+                    self._log_event(
                         f"[{attempted_patient_id}] discard"
                         f" | reason={discard_reason}"
                     )
@@ -385,6 +413,7 @@ class SimulationLoop:
             self._log(f"Metrics | {self._format_metrics_line(summary)}")
         if not self.config.run_evaluation:
             return
+        self._maybe_run_success_milestone_evaluation(summary)
         if self.config.eval_every <= 0:
             return
         if self.attempted_patients <= 0:
@@ -399,10 +428,37 @@ class SimulationLoop:
         )
         if self.config.eval_dataset:
             eval_summary = self._run_periodic_dataset_evaluation()
+            self.memory.append_heldout_eval_summary(eval_summary)
             self._log(
                 "Held-out evaluation written"
                 f" | accuracy={eval_summary['accuracy']}"
                 f" | path={self.memory.run_dir / 'eval_summary.json'}"
+            )
+
+    def _maybe_run_success_milestone_evaluation(self, summary: dict[str, Any]) -> None:
+        if not self.config.eval_dataset:
+            return
+        due_milestones = [
+            milestone
+            for milestone in self.eval_success_milestones
+            if milestone <= self.successful_cases
+            and milestone not in self.completed_success_eval_milestones
+        ]
+        for milestone in due_milestones:
+            self.completed_success_eval_milestones.add(milestone)
+            checkpoint_summary = dict(summary)
+            checkpoint_summary["trigger_successful_cases"] = milestone
+            self.memory.append_eval_summary(checkpoint_summary)
+            eval_summary = self._run_periodic_dataset_evaluation(
+                output_dir=self.memory.run_dir / f"eval_success_{milestone:06d}",
+                trigger_successful_cases=milestone,
+            )
+            self.memory.append_heldout_eval_summary(eval_summary)
+            self._log(
+                "Held-out milestone evaluation written"
+                f" | successful_cases={milestone}"
+                f" | accuracy={eval_summary['accuracy']}"
+                f" | path={self.memory.run_dir / f'eval_success_{milestone:06d}' / 'eval_summary.json'}"
             )
 
     def _format_metrics_line(self, summary: dict[str, Any]) -> str:
@@ -427,7 +483,15 @@ class SimulationLoop:
         timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
         print(f"[{timestamp}] {message}", flush=True)
 
-    def _run_periodic_dataset_evaluation(self) -> dict[str, Any]:
+    def _log_event(self, message: str) -> None:
+        if self.config.verbose_events:
+            self._log(message)
+
+    def _run_periodic_dataset_evaluation(
+        self,
+        output_dir: Path | None = None,
+        trigger_successful_cases: int | None = None,
+    ) -> dict[str, Any]:
         evaluator = EvaluationRunner(
             backend=self.backend,
             config=EvaluationConfig(
@@ -439,13 +503,22 @@ class SimulationLoop:
                 eval_mode=self.config.eval_mode,
                 n_success_memory=self.config.n_success_memory,
                 n_reflection_memory=self.config.n_reflection_memory,
+                retrieval_mode=self.config.retrieval_mode,
+                embedding_model=self.config.embedding_model,
+                embedding_device=self.config.embedding_device,
+                embedding_batch_size=self.config.embedding_batch_size,
                 temperature=0.0,
                 max_tokens=min(self.config.max_tokens, 512),
                 allow_eval_learning=self.config.allow_eval_learning,
-                output_dir=str(self.memory.run_dir),
+                output_dir=str(output_dir or self.memory.run_dir),
                 quiet=self.config.quiet,
             ),
             successful_case_records=list(self.memory.successful_cases),
             validated_reflection_records=list(self.memory.validated_reflections),
+            successful_case_index=self.memory.success_index,
+            validated_reflection_index=self.memory.reflection_index,
         )
-        return evaluator.run(trigger_attempted_patients=self.attempted_patients)
+        return evaluator.run(
+            trigger_attempted_patients=self.attempted_patients,
+            trigger_successful_cases=trigger_successful_cases,
+        )

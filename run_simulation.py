@@ -5,6 +5,12 @@ from typing import Any
 
 from src.backends import HuggingFaceBackend, OllamaBackend
 from src.loop import SimulationConfig, SimulationLoop
+from src.semantic_retrieval import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DEVICE,
+    DEFAULT_EMBEDDING_MODEL,
+    RETRIEVAL_MODES,
+)
 
 
 def positive_int(value: str) -> int:
@@ -21,6 +27,19 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
+def success_milestones(value: str) -> tuple[int, ...]:
+    if not value.strip():
+        return ()
+    milestones: list[int] = []
+    for raw_piece in value.split(","):
+        piece = raw_piece.strip()
+        if not piece:
+            continue
+        parsed = positive_int(piece)
+        milestones.append(parsed)
+    return tuple(milestones)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Minimal expert-oriented infectious disease SEAL/RCL diagnosis loop."
@@ -33,9 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_name", required=True)
     parser.add_argument(
         "--eval_every",
-        type=positive_int,
-        default=5,
-        help="When --run_evaluation is enabled, write eval summaries every N loop iterations.",
+        type=non_negative_int,
+        default=0,
+        help="When --run_evaluation is enabled, run attempted-patient evaluation every N attempts. Set 0 to disable.",
     )
     parser.add_argument(
         "--run_evaluation",
@@ -50,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--eval_mode",
         choices=["no_memory", "with_memory", "kb_only", "memory_only"],
         help="Optional held-out evaluation mode for periodic eval runs.",
+    )
+    parser.add_argument(
+        "--eval_success_milestones",
+        type=success_milestones,
+        default=(),
+        help="Comma-separated successful-case checkpoints for held-out evaluation, e.g. 5000,10000,15000,20000.",
     )
     parser.add_argument(
         "--allow_eval_learning",
@@ -67,12 +92,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress running progress logs.",
     )
+    parser.add_argument(
+        "--verbose_events",
+        action="store_true",
+        help="Print every sampled patient, success, retry, and discard event.",
+    )
 
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max_tokens", type=positive_int, default=768)
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--n_success_memory", type=non_negative_int, default=5)
-    parser.add_argument("--n_reflection_memory", type=non_negative_int, default=5)
+    parser.add_argument("--n_success_memory", type=non_negative_int, default=3)
+    parser.add_argument("--n_reflection_memory", type=non_negative_int, default=4)
+    parser.add_argument(
+        "--retrieval_mode",
+        choices=sorted(RETRIEVAL_MODES),
+        default="semantic",
+        help="Memory retrieval mode: semantic cosine retrieval or legacy tag overlap.",
+    )
+    parser.add_argument("--embedding_model", default=DEFAULT_EMBEDDING_MODEL)
+    parser.add_argument("--embedding_device", default=DEFAULT_EMBEDDING_DEVICE)
+    parser.add_argument(
+        "--embedding_batch_size",
+        type=positive_int,
+        default=DEFAULT_EMBEDDING_BATCH_SIZE,
+    )
     parser.add_argument("--ollama_host", default="http://localhost:11434")
     parser.add_argument("--patient_qc", action="store_true")
     return parser
@@ -101,14 +144,20 @@ def main() -> None:
         run_evaluation=args.run_evaluation,
         eval_dataset=args.eval_dataset,
         eval_mode=args.eval_mode,
+        eval_success_milestones=args.eval_success_milestones,
         allow_eval_learning=args.allow_eval_learning,
         log_every=args.log_every,
+        verbose_events=args.verbose_events,
         quiet=args.quiet,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
         seed=args.seed,
         n_success_memory=args.n_success_memory,
         n_reflection_memory=args.n_reflection_memory,
+        retrieval_mode=args.retrieval_mode,
+        embedding_model=args.embedding_model,
+        embedding_device=args.embedding_device,
+        embedding_batch_size=args.embedding_batch_size,
         ollama_host=args.ollama_host,
         patient_qc=args.patient_qc,
     )

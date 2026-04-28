@@ -138,11 +138,25 @@ class HuggingFaceBackend:
 
         config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         architectures = set(getattr(config, "architectures", []) or [])
-        is_qwen35_conditional = (
+        model_type = getattr(config, "model_type", None)
+        qwen35_model_class = None
+        if (
+            "Qwen3_5MoeForConditionalGeneration" in architectures
+            or model_type == "qwen3_5_moe"
+        ):
+            try:
+                from transformers import Qwen3_5MoeForConditionalGeneration
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Qwen3.6 MoE models require transformers with "
+                    "Qwen3_5MoeForConditionalGeneration support. Install "
+                    "requirements-hf.txt, which pins transformers>=4.57.1."
+                ) from exc
+            qwen35_model_class = Qwen3_5MoeForConditionalGeneration
+        elif (
             "Qwen3_5ForConditionalGeneration" in architectures
-            or getattr(config, "model_type", None) == "qwen3_5"
-        )
-        if is_qwen35_conditional:
+            or model_type == "qwen3_5"
+        ):
             try:
                 from transformers import Qwen3_5ForConditionalGeneration
             except ImportError as exc:
@@ -150,8 +164,11 @@ class HuggingFaceBackend:
                     "Qwen3.6 requires transformers with Qwen3_5ForConditionalGeneration "
                     "support. Install requirements-hf.txt, which pins transformers>=4.57.1."
                 ) from exc
+            qwen35_model_class = Qwen3_5ForConditionalGeneration
+
+        if qwen35_model_class is not None:
             processor = AutoProcessor.from_pretrained(self.model, trust_remote_code=True)
-            model = Qwen3_5ForConditionalGeneration.from_pretrained(
+            model = qwen35_model_class.from_pretrained(
                 self.model,
                 **model_kwargs,
             )
