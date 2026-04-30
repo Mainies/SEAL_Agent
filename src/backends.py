@@ -85,6 +85,30 @@ def configure_hf_environment() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
+def _hf_cache_debug_message(model: str) -> str:
+    cache_env = {
+        "HF_HOME": os.environ.get("HF_HOME"),
+        "HF_HUB_CACHE": os.environ.get("HF_HUB_CACHE"),
+        "TRANSFORMERS_CACHE": os.environ.get("TRANSFORMERS_CACHE"),
+        "HF_DATASETS_CACHE": os.environ.get("HF_DATASETS_CACHE"),
+        "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+        "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+    }
+    formatted_env = "\n".join(f"  {name}={value or '<unset>'}" for name, value in cache_env.items())
+    return (
+        f"Could not load Hugging Face config for {model!r}.\n"
+        "This usually means the model is not already present in the configured "
+        "Hugging Face cache and the job cannot reach huggingface.co, or the job "
+        "does not have permission to access the model repository.\n"
+        "Configured cache/offline environment:\n"
+        f"{formatted_env}\n"
+        "On an HPC login node with internet access, preload the model into the "
+        "same cache used by the batch job, for example:\n"
+        "  huggingface-cli download <model-id> --cache-dir \"$HF_HUB_CACHE\"\n"
+        "Then rerun the job with the same HF_HOME/HF_HUB_CACHE values."
+    )
+
+
 @dataclass
 class HuggingFaceBackend:
     model: str
@@ -136,7 +160,10 @@ class HuggingFaceBackend:
         else:
             model_kwargs["dtype"] = torch.float32
 
-        config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
+        try:
+            config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
+        except OSError as exc:
+            raise RuntimeError(_hf_cache_debug_message(self.model)) from exc
         architectures = set(getattr(config, "architectures", []) or [])
         model_type = getattr(config, "model_type", None)
         qwen35_model_class = None
