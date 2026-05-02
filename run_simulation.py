@@ -64,7 +64,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output_dir",
         "--output-dir",
-        help="Optional exact output directory for examination-selection runs.",
+        help="Optional exact output directory for training artifacts.",
+    )
+    parser.add_argument(
+        "--current_run",
+        "--current-run",
+        action="store_true",
+        help="Use <runs_root>/current_run for training artifacts and resume existing memory.",
+    )
+    parser.add_argument(
+        "--current_run_dir",
+        "--current-run-dir",
+        default="current_run",
+        help="Directory name/path used by --current_run. Relative paths are under --runs_root.",
     )
     parser.add_argument(
         "--n_successful_cases",
@@ -112,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Print running metrics every N attempted patients.",
     )
+    parser.add_argument("--runs_root", "--runs-root", default="runs")
     parser.add_argument(
         "--quiet",
         action="store_true",
@@ -157,13 +170,23 @@ def build_backend(args: argparse.Namespace) -> Any:
     raise ValueError(f"Unsupported backend: {args.backend}")
 
 
+def resolve_current_run_dir(args: argparse.Namespace) -> str | None:
+    if not args.current_run:
+        return None
+    current_run_dir = Path(args.current_run_dir)
+    if current_run_dir.is_absolute():
+        return str(current_run_dir)
+    return str(Path(args.runs_root) / current_run_dir)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     backend = build_backend(args)
-    run_name = args.run_name or (
-        Path(args.output_dir).name if args.output_dir else None
-    )
+    if args.current_run and args.output_dir:
+        parser.error("--current_run and --output_dir cannot be used together")
+    output_dir = resolve_current_run_dir(args) or args.output_dir
+    run_name = args.run_name or (Path(output_dir).name if output_dir else None)
 
     if args.task_type == EXAMINATION_TASK_TYPE:
         if not run_name:
@@ -195,7 +218,9 @@ def main() -> None:
             embedding_model=args.embedding_model,
             embedding_device=args.embedding_device,
             embedding_batch_size=args.embedding_batch_size,
-            output_dir=args.output_dir,
+            runs_root=args.runs_root,
+            output_dir=output_dir,
+            resume_existing=args.current_run,
         )
         loop = ExaminationLoop(backend=backend, config=config)
         result = loop.run()
@@ -244,6 +269,9 @@ def main() -> None:
         embedding_batch_size=args.embedding_batch_size,
         ollama_host=args.ollama_host,
         patient_qc=args.patient_qc,
+        runs_root=args.runs_root,
+        output_dir=output_dir,
+        resume_existing=args.current_run,
     )
 
     loop = SimulationLoop(backend=backend, config=config)

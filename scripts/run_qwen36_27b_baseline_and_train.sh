@@ -34,6 +34,9 @@ EMBEDDING_MODEL="${EMBEDDING_MODEL:-pritamdeka/S-PubMedBert-MS-MARCO}"
 EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
 EMBEDDING_BATCH_SIZE="${EMBEDDING_BATCH_SIZE:-16}"
 RUNS_ROOT="${RUNS_ROOT:-runs}"
+CURRENT_RUN="${CURRENT_RUN:-0}"
+CURRENT_RUN_DIR="${CURRENT_RUN_DIR:-current_run}"
+SKIP_BASELINE="${SKIP_BASELINE:-0}"
 
 if [[ "${TASK_TYPE}" == "diagnosis" ]]; then
   BASELINE_RUN_NAME="${BASELINE_RUN_NAME:-qwen36_35b_a3b_baseline_eval}"
@@ -54,6 +57,9 @@ echo "  held-out success milestones: ${EVAL_SUCCESS_MILESTONES}"
 echo "  retrieval: ${RETRIEVAL_MODE}"
 echo "  embedding model: ${EMBEDDING_MODEL}"
 echo "  embedding device: ${EMBEDDING_DEVICE}"
+if [[ "${CURRENT_RUN}" == "1" || "${CURRENT_RUN}" == "true" ]]; then
+  echo "  persistent current run: ${RUNS_ROOT}/${CURRENT_RUN_DIR}"
+fi
 
 cmd=(
   python run_benchmark.py
@@ -77,6 +83,14 @@ cmd=(
 
 if [[ -n "${EVAL_LIMIT}" ]]; then
   cmd+=(--eval_limit "${EVAL_LIMIT}")
+fi
+
+if [[ "${CURRENT_RUN}" == "1" || "${CURRENT_RUN}" == "true" ]]; then
+  cmd+=(--current_run --current_run_dir "${CURRENT_RUN_DIR}")
+fi
+
+if [[ "${SKIP_BASELINE}" == "1" || "${SKIP_BASELINE}" == "true" ]]; then
+  cmd+=(--skip_baseline)
 fi
 
 if [[ "${TASK_TYPE}" == "diagnosis" ]]; then

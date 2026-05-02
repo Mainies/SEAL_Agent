@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from src.utils import (
     build_expert_lesson,
     classify_failure_mode,
     iso_now,
+    load_jsonl,
     now_timestamp,
     safe_rate,
     slugify,
@@ -37,14 +39,19 @@ class MemoryStore:
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
         embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+        output_dir: str | None = None,
+        resume_existing: bool = False,
     ) -> None:
         if retrieval_mode not in RETRIEVAL_MODES:
             raise ValueError(f"Unsupported retrieval_mode: {retrieval_mode}")
         self.retrieval_mode = retrieval_mode
 
-        run_directory_name = f"{now_timestamp()}_{slugify(run_name)}"
-        self.run_dir = Path(runs_root) / run_directory_name
-        self.run_dir.mkdir(parents=True, exist_ok=False)
+        self.run_dir = (
+            Path(output_dir)
+            if output_dir
+            else Path(runs_root) / f"{now_timestamp()}_{slugify(run_name)}"
+        )
+        self.run_dir.mkdir(parents=True, exist_ok=resume_existing or bool(output_dir))
 
         self.success_path = self.run_dir / "successful_cases.jsonl"
         self.reflection_path = self.run_dir / "validated_reflections.jsonl"
@@ -53,6 +60,25 @@ class MemoryStore:
         self.heldout_eval_summary_path = self.run_dir / "heldout_eval_summaries.jsonl"
         self.final_summary_path = self.run_dir / "final_summary.json"
         self.metadata_path = self.run_dir / "run_metadata.json"
+        if output_dir and not resume_existing:
+            existing_outputs = [
+                path
+                for path in (
+                    self.success_path,
+                    self.reflection_path,
+                    self.discard_path,
+                    self.eval_summary_path,
+                    self.heldout_eval_summary_path,
+                    self.final_summary_path,
+                    self.metadata_path,
+                )
+                if path.exists()
+            ]
+            if existing_outputs:
+                existing_list = ", ".join(str(path) for path in existing_outputs)
+                raise FileExistsError(
+                    f"Output directory already contains diagnosis run files: {existing_list}"
+                )
 
         self.successful_cases: list[dict[str, Any]] = []
         self.validated_reflections: list[dict[str, Any]] = []
@@ -65,6 +91,10 @@ class MemoryStore:
         self._success_counts_by_condition: dict[str, int] = {}
         self._success_index: SemanticRecordIndex | None = None
         self._reflection_index: SemanticRecordIndex | None = None
+
+        if resume_existing:
+            self._load_existing_records()
+
         if self.retrieval_mode == "semantic":
             embedding_config = embedding_config_from_env(
                 model=embedding_model,
@@ -82,7 +112,86 @@ class MemoryStore:
                 embedder=embedder,
                 text_builder=experience_retrieval_text,
             )
-        write_json(self.metadata_path, config_snapshot)
+        write_json(
+            self.metadata_path,
+            {
+                **config_snapshot,
+                "resume_existing": resume_existing,
+                "resumed_successful_cases": len(self.successful_cases),
+                "resumed_validated_reflections": len(self.validated_reflections),
+                "resumed_discards": len(self.discards),
+            },
+        )
+
+    def _load_existing_records(self) -> None:
+        self.successful_cases = self._load_jsonl_if_exists(self.success_path)
+        self.validated_reflections = self._load_jsonl_if_exists(self.reflection_path)
+        self.discards = self._load_jsonl_if_exists(self.discard_path)
+        self.eval_summaries = self._load_jsonl_if_exists(self.eval_summary_path)
+        self.heldout_eval_summaries = self._load_jsonl_if_exists(
+            self.heldout_eval_summary_path
+        )
+        self._success_counter = self._max_numeric_suffix(
+            self.successful_cases,
+            field="successful_case_id",
+            fallback=len(self.successful_cases),
+        )
+        self._reflection_counter = self._max_numeric_suffix(
+            self.validated_reflections,
+            field="reflection_id",
+            fallback=len(self.validated_reflections),
+        )
+        for record in self.successful_cases:
+            condition_id = record.get("condition_id")
+            if isinstance(condition_id, str) and condition_id:
+                self._success_counts_by_condition[condition_id] = (
+                    self._success_counts_by_condition.get(condition_id, 0) + 1
+                )
+
+    def _load_jsonl_if_exists(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        try:
+            return load_jsonl(path)
+        except json.JSONDecodeError:
+            return self._load_jsonl_allow_truncated_final_line(path)
+
+    def _load_jsonl_allow_truncated_final_line(self, path: Path) -> list[dict[str, Any]]:
+        lines = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        records: list[dict[str, Any]] = []
+        for index, line in enumerate(lines):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                if index == len(lines) - 1:
+                    break
+                raise
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"Expected JSON object on line {index + 1} of {path}, got {type(payload).__name__}."
+                )
+            records.append(payload)
+        return records
+
+    def _max_numeric_suffix(
+        self,
+        records: list[dict[str, Any]],
+        field: str,
+        fallback: int,
+    ) -> int:
+        maximum = fallback
+        for record in records:
+            value = record.get(field)
+            if not isinstance(value, str):
+                continue
+            suffix = value.rsplit("_", 1)[-1]
+            if suffix.isdigit():
+                maximum = max(maximum, int(suffix))
+        return maximum
 
     def success_counts_by_condition(self) -> dict[str, int]:
         return dict(self._success_counts_by_condition)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 from src.backends import HuggingFaceBackend, OllamaBackend
@@ -80,6 +81,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval_every", "--eval-every", type=non_negative_int, default=0)
     parser.add_argument("--log_every", "--log-every", type=positive_int, default=10)
     parser.add_argument("--runs_root", "--runs-root", default="runs")
+    parser.add_argument(
+        "--current_run",
+        "--current-run",
+        action="store_true",
+        help="Use <runs_root>/current_run for training artifacts and resume existing memory.",
+    )
+    parser.add_argument(
+        "--current_run_dir",
+        "--current-run-dir",
+        default="current_run",
+        help="Directory name/path used by --current_run. Relative paths are under --runs_root.",
+    )
+    parser.add_argument(
+        "--skip_baseline",
+        "--skip-baseline",
+        action="store_true",
+        help="Skip the baseline evaluation, useful when resuming an existing current run.",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose_events", action="store_true")
 
@@ -116,10 +135,20 @@ def build_backend(args: argparse.Namespace) -> Any:
     raise ValueError(f"Unsupported backend: {args.backend}")
 
 
+def resolve_current_run_dir(args: argparse.Namespace) -> str | None:
+    if not args.current_run:
+        return None
+    current_run_dir = Path(args.current_run_dir)
+    if current_run_dir.is_absolute():
+        return str(current_run_dir)
+    return str(Path(args.runs_root) / current_run_dir)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     backend = build_backend(args)
+    current_run_dir = resolve_current_run_dir(args)
 
     if args.task_type == EXAMINATION_TASK_TYPE:
         eval_file = args.eval_file or args.eval_dataset
@@ -128,31 +157,34 @@ def main() -> None:
         if not args.exam_kb_path:
             parser.error("--exam_kb_path is required when --task_type examination_selection")
 
-        baseline = ExaminationEvaluationRunner(
-            backend=backend,
-            config=ExaminationEvalConfig(
-                eval_file=eval_file,
-                exam_kb_path=args.exam_kb_path,
-                run_name=args.baseline_run_name,
-                backend=args.backend,
-                model=args.model,
-                eval_mode="no_memory",
-                n_success_memory=args.n_success_memory,
-                n_reflection_memory=args.n_reflection_memory,
-                retrieval_mode=args.retrieval_mode,
-                embedding_model=args.embedding_model,
-                embedding_device=args.embedding_device,
-                embedding_batch_size=args.embedding_batch_size,
-                temperature=args.temperature,
-                max_tokens=args.max_tokens,
-                eval_limit=args.eval_limit,
-                runs_root=args.runs_root,
-                quiet=args.quiet,
-            ),
-        )
-        baseline_summary = baseline.run(trigger_successful_cases=0)
-        print(f"Baseline examination evaluation directory: {baseline.output_dir}")
-        print(f"Baseline examination accuracy: {baseline_summary['accuracy']}")
+        if args.skip_baseline:
+            print("Baseline examination evaluation skipped.")
+        else:
+            baseline = ExaminationEvaluationRunner(
+                backend=backend,
+                config=ExaminationEvalConfig(
+                    eval_file=eval_file,
+                    exam_kb_path=args.exam_kb_path,
+                    run_name=args.baseline_run_name,
+                    backend=args.backend,
+                    model=args.model,
+                    eval_mode="no_memory",
+                    n_success_memory=args.n_success_memory,
+                    n_reflection_memory=args.n_reflection_memory,
+                    retrieval_mode=args.retrieval_mode,
+                    embedding_model=args.embedding_model,
+                    embedding_device=args.embedding_device,
+                    embedding_batch_size=args.embedding_batch_size,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    eval_limit=args.eval_limit,
+                    runs_root=args.runs_root,
+                    quiet=args.quiet,
+                ),
+            )
+            baseline_summary = baseline.run(trigger_successful_cases=0)
+            print(f"Baseline examination evaluation directory: {baseline.output_dir}")
+            print(f"Baseline examination accuracy: {baseline_summary['accuracy']}")
 
         loop = ExaminationLoop(
             backend=backend,
@@ -181,6 +213,8 @@ def main() -> None:
                 embedding_device=args.embedding_device,
                 embedding_batch_size=args.embedding_batch_size,
                 runs_root=args.runs_root,
+                output_dir=current_run_dir,
+                resume_existing=args.current_run,
             ),
         )
         result = loop.run()
@@ -199,31 +233,34 @@ def main() -> None:
     if not args.sampler_config:
         parser.error("--sampler_config is required when --task_type diagnosis")
 
-    baseline = EvaluationRunner(
-        backend=backend,
-        config=EvaluationConfig(
-            eval_dataset=args.eval_dataset,
-            kb_path=args.kb_path,
-            run_name=args.baseline_run_name,
-            backend=args.backend,
-            model=args.model,
-            eval_mode="no_memory",
-            n_success_memory=args.n_success_memory,
-            n_reflection_memory=args.n_reflection_memory,
-            retrieval_mode=args.retrieval_mode,
-            embedding_model=args.embedding_model,
-            embedding_device=args.embedding_device,
-            embedding_batch_size=args.embedding_batch_size,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            eval_limit=args.eval_limit,
-            runs_root=args.runs_root,
-            quiet=args.quiet,
-        ),
-    )
-    baseline_summary = baseline.run(trigger_successful_cases=0)
-    print(f"Baseline evaluation directory: {baseline.output_dir}")
-    print(f"Baseline accuracy: {baseline_summary['accuracy']}")
+    if args.skip_baseline:
+        print("Baseline evaluation skipped.")
+    else:
+        baseline = EvaluationRunner(
+            backend=backend,
+            config=EvaluationConfig(
+                eval_dataset=args.eval_dataset,
+                kb_path=args.kb_path,
+                run_name=args.baseline_run_name,
+                backend=args.backend,
+                model=args.model,
+                eval_mode="no_memory",
+                n_success_memory=args.n_success_memory,
+                n_reflection_memory=args.n_reflection_memory,
+                retrieval_mode=args.retrieval_mode,
+                embedding_model=args.embedding_model,
+                embedding_device=args.embedding_device,
+                embedding_batch_size=args.embedding_batch_size,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                eval_limit=args.eval_limit,
+                runs_root=args.runs_root,
+                quiet=args.quiet,
+            ),
+        )
+        baseline_summary = baseline.run(trigger_successful_cases=0)
+        print(f"Baseline evaluation directory: {baseline.output_dir}")
+        print(f"Baseline accuracy: {baseline_summary['accuracy']}")
 
     loop = SimulationLoop(
         backend=backend,
@@ -255,6 +292,8 @@ def main() -> None:
             ollama_host=args.ollama_host,
             patient_qc=args.patient_qc,
             runs_root=args.runs_root,
+            output_dir=current_run_dir,
+            resume_existing=args.current_run,
         ),
     )
     result = loop.run()

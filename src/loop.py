@@ -52,6 +52,8 @@ class SimulationConfig:
     ollama_host: str = "http://localhost:11434"
     patient_qc: bool = False
     runs_root: str = "runs"
+    output_dir: str | None = None
+    resume_existing: bool = False
 
 
 class SimulationLoop:
@@ -80,26 +82,14 @@ class SimulationLoop:
             embedding_model=config.embedding_model,
             embedding_device=config.embedding_device,
             embedding_batch_size=config.embedding_batch_size,
+            output_dir=config.output_dir,
+            resume_existing=config.resume_existing,
         )
 
-        self.successful_cases = 0
-        self.attempted_patients = 0
-        self.first_attempt_successes = 0
-        self.retry_successes = 0
-        self.retry_attempts = 0
-        self.patient_generation_empty_count = 0
-        self.qc_discarded_patients = 0
-        self.retry_fail_discards = 0
-        self.reflections_emitted_count = 0
-        self.validated_reflection_count = 0
-        self.failed_reflection_count = 0
-        self.no_reflection_count = 0
-        self.must_not_miss_success_count = 0
-
-        self.success_count_by_training_lane: dict[str, int] = defaultdict(int)
-        self.retry_success_count_by_training_lane: dict[str, int] = defaultdict(int)
-        self.discard_count_by_training_lane: dict[str, int] = defaultdict(int)
-        self.coverage_by_training_lane: dict[str, set[str]] = defaultdict(set)
+        self._condition_index = {
+            condition["condition_id"]: condition for condition in self.conditions
+        }
+        self._restore_metrics_from_memory()
         self.eval_success_milestones = tuple(
             sorted(
                 {
@@ -109,7 +99,9 @@ class SimulationLoop:
                 }
             )
         )
-        self.completed_success_eval_milestones: set[int] = set()
+        self.completed_success_eval_milestones: set[int] = (
+            self._completed_eval_milestones_from_memory()
+        )
 
     def run(self) -> dict[str, Any]:
         max_attempts = max(
@@ -123,6 +115,13 @@ class SimulationLoop:
             f" | model={self.config.model}"
             f" | evaluation={'on' if self.config.run_evaluation else 'off'}"
         )
+        if self.successful_cases or self.attempted_patients:
+            self._log(
+                "Resumed persisted diagnosis run"
+                f" | attempts={self.attempted_patients}"
+                f" | successes={self.successful_cases}"
+                f" | reflections={self.validated_reflection_count}"
+            )
 
         while self.successful_cases < self.config.n_successful_cases:
             if self.attempted_patients >= max_attempts:
@@ -408,6 +407,88 @@ class SimulationLoop:
 
     def evaluate(self) -> dict[str, Any]:
         return self._build_summary()
+
+    def _restore_metrics_from_memory(self) -> None:
+        success_records = self.memory.successful_cases
+        discard_records = self.memory.discards
+
+        self.successful_cases = len(success_records)
+        self.attempted_patients = len(success_records) + len(discard_records)
+        self.first_attempt_successes = sum(
+            1 for record in success_records if record.get("solved_on") == "first_attempt"
+        )
+        self.retry_successes = sum(
+            1 for record in success_records if record.get("solved_on") == "retry"
+        )
+        self.patient_generation_empty_count = sum(
+            1
+            for record in discard_records
+            if record.get("reason") == "patient_generation_empty"
+        )
+        self.qc_discarded_patients = sum(
+            1
+            for record in discard_records
+            if str(record.get("reason", "")).startswith("qc_discard:")
+        )
+        self.retry_fail_discards = sum(
+            1 for record in discard_records if self._is_retry_discard(record)
+        )
+        self.retry_attempts = self.retry_successes + self.retry_fail_discards
+        self.no_reflection_count = sum(
+            1 for record in discard_records if self._is_no_reflection_discard(record)
+        )
+        self.failed_reflection_count = sum(
+            1 for record in discard_records if self._is_failed_reflection_discard(record)
+        )
+        self.validated_reflection_count = len(self.memory.validated_reflections)
+        self.reflections_emitted_count = (
+            self.validated_reflection_count + self.failed_reflection_count
+        )
+        self.must_not_miss_success_count = sum(
+            1
+            for record in success_records
+            if self._condition_index.get(record.get("condition_id"), {})
+            .get("expert_curriculum", {})
+            .get("must_not_miss")
+            is True
+        )
+
+        self.success_count_by_training_lane = defaultdict(int)
+        self.retry_success_count_by_training_lane = defaultdict(int)
+        self.discard_count_by_training_lane = defaultdict(int)
+        self.coverage_by_training_lane = defaultdict(set)
+        for record in success_records:
+            lane = str(record.get("training_lane", "unknown"))
+            self.success_count_by_training_lane[lane] += 1
+            self.coverage_by_training_lane[lane].add(str(record.get("condition_id", "")))
+            if record.get("solved_on") == "retry":
+                self.retry_success_count_by_training_lane[lane] += 1
+        for record in discard_records:
+            lane = str(record.get("training_lane", "unknown"))
+            self.discard_count_by_training_lane[lane] += 1
+
+    def _is_retry_discard(self, record: dict[str, Any]) -> bool:
+        reason = str(record.get("reason", ""))
+        return reason == "malformed_judge_output" or reason.startswith("retry_failed:")
+
+    def _is_no_reflection_discard(self, record: dict[str, Any]) -> bool:
+        reason = str(record.get("reason", ""))
+        return reason in {"malformed_judge_output", "retry_failed:no_reflection"}
+
+    def _is_failed_reflection_discard(self, record: dict[str, Any]) -> bool:
+        reason = str(record.get("reason", ""))
+        return reason in {
+            "retry_failed:malformed_judge_output",
+            "retry_failed:unrecovered",
+        }
+
+    def _completed_eval_milestones_from_memory(self) -> set[int]:
+        milestones: set[int] = set()
+        for summary in [*self.memory.eval_summaries, *self.memory.heldout_eval_summaries]:
+            value = summary.get("trigger_successful_cases")
+            if isinstance(value, int):
+                milestones.add(value)
+        return milestones
 
     def _maybe_run_periodic_evaluation(self) -> None:
         summary = self._build_summary()

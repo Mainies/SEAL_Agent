@@ -79,6 +79,7 @@ class ExaminationLoopConfig:
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     runs_root: str = "runs"
     output_dir: str | None = None
+    resume_existing: bool = False
 
 
 @dataclass(frozen=True)
@@ -484,6 +485,7 @@ class ExaminationMemoryStore:
         embedding_device: str,
         embedding_batch_size: int,
         output_dir: str | None = None,
+        resume_existing: bool = False,
     ) -> None:
         if retrieval_mode not in RETRIEVAL_MODES:
             raise ValueError(f"Unsupported retrieval_mode: {retrieval_mode}")
@@ -493,7 +495,7 @@ class ExaminationMemoryStore:
             if output_dir
             else Path(runs_root) / f"{_now_timestamp()}_{slugify(run_name)}"
         )
-        self.run_dir.mkdir(parents=True, exist_ok=bool(output_dir))
+        self.run_dir.mkdir(parents=True, exist_ok=resume_existing or bool(output_dir))
 
         self.success_path = self.run_dir / "examination_successful_cases.jsonl"
         self.reflection_path = self.run_dir / "examination_validated_reflections.jsonl"
@@ -502,7 +504,7 @@ class ExaminationMemoryStore:
         self.heldout_eval_summary_path = self.run_dir / "heldout_eval_summaries.jsonl"
         self.final_summary_path = self.run_dir / "final_summary.json"
         self.metadata_path = self.run_dir / "run_metadata.json"
-        if output_dir:
+        if output_dir and not resume_existing:
             existing_outputs = [
                 path
                 for path in (
@@ -533,6 +535,9 @@ class ExaminationMemoryStore:
 
         self._success_index: SemanticRecordIndex | None = None
         self._reflection_index: SemanticRecordIndex | None = None
+        if resume_existing:
+            self._load_existing_records()
+
         if retrieval_mode == "semantic":
             embedding_config = embedding_config_from_env(
                 model=embedding_model,
@@ -551,7 +556,41 @@ class ExaminationMemoryStore:
                 text_builder=exam_reflection_retrieval_text,
             )
 
-        write_json(self.metadata_path, config_snapshot)
+        write_json(
+            self.metadata_path,
+            {
+                **config_snapshot,
+                "resume_existing": resume_existing,
+                "resumed_successful_cases": len(self.successful_cases),
+                "resumed_validated_reflections": len(self.validated_reflections),
+                "resumed_discards": len(self.discards),
+            },
+        )
+
+    def _load_existing_records(self) -> None:
+        self.successful_cases = _load_jsonl_if_exists(self.success_path)
+        self.validated_reflections = _load_jsonl_if_exists(self.reflection_path)
+        self.discards = _load_jsonl_if_exists(self.discard_path)
+        self.eval_summaries = _load_jsonl_if_exists(self.eval_summary_path)
+        self.heldout_eval_summaries = _load_jsonl_if_exists(
+            self.heldout_eval_summary_path
+        )
+        self._success_counter = _max_numeric_suffix(
+            self.successful_cases,
+            field="successful_case_id",
+            fallback=len(self.successful_cases),
+        )
+        self._reflection_counter = _max_numeric_suffix(
+            self.validated_reflections,
+            field="reflection_id",
+            fallback=len(self.validated_reflections),
+        )
+        for record in self.successful_cases:
+            condition_id = record.get("condition_id")
+            if isinstance(condition_id, str) and condition_id:
+                self._success_counts_by_condition[condition_id] = (
+                    self._success_counts_by_condition.get(condition_id, 0) + 1
+                )
 
     @property
     def success_index(self) -> SemanticRecordIndex | None:
@@ -781,22 +820,9 @@ class ExaminationLoop:
             embedding_device=config.embedding_device,
             embedding_batch_size=config.embedding_batch_size,
             output_dir=config.output_dir,
+            resume_existing=config.resume_existing,
         )
-        self.successful_cases = 0
-        self.attempted_patients = 0
-        self.first_attempt_successes = 0
-        self.retry_successes = 0
-        self.retry_attempts = 0
-        self.patient_generation_empty_count = 0
-        self.qc_discarded_patients = 0
-        self.retry_fail_discards = 0
-        self.reflections_emitted_count = 0
-        self.validated_reflection_count = 0
-        self.failed_reflection_count = 0
-        self.no_reflection_count = 0
-        self.coverage_by_condition: set[str] = set()
-        self.coverage_by_curriculum_lane: dict[str, set[str]] = defaultdict(set)
-        self.coverage_by_exam_focus: dict[str, set[str]] = defaultdict(set)
+        self._restore_metrics_from_memory()
         self.eval_success_milestones = tuple(
             sorted(
                 {
@@ -806,7 +832,9 @@ class ExaminationLoop:
                 }
             )
         )
-        self.completed_success_eval_milestones: set[int] = set()
+        self.completed_success_eval_milestones: set[int] = (
+            self._completed_eval_milestones_from_memory()
+        )
 
     def run(self) -> dict[str, Any]:
         max_attempts = max(self.config.n_successful_cases * MAX_ATTEMPT_MULTIPLIER, 100)
@@ -816,6 +844,13 @@ class ExaminationLoop:
             f" | target_successes={self.config.n_successful_cases}"
             f" | model={self.config.model}"
         )
+        if self.successful_cases or self.attempted_patients:
+            self._log(
+                "Resumed persisted examination run"
+                f" | attempts={self.attempted_patients}"
+                f" | successes={self.successful_cases}"
+                f" | reflections={self.validated_reflection_count}"
+            )
         while self.successful_cases < self.config.n_successful_cases:
             if self.attempted_patients >= max_attempts:
                 raise RuntimeError(
@@ -1079,6 +1114,79 @@ class ExaminationLoop:
             "successful_case_memory_size": len(self.memory.successful_cases),
             "validated_reflection_memory_size": len(self.memory.validated_reflections),
         }
+
+    def _restore_metrics_from_memory(self) -> None:
+        success_records = self.memory.successful_cases
+        discard_records = self.memory.discards
+
+        self.successful_cases = len(success_records)
+        self.attempted_patients = len(success_records) + len(discard_records)
+        self.first_attempt_successes = sum(
+            1 for record in success_records if record.get("solved_on") == "first_attempt"
+        )
+        self.retry_successes = sum(
+            1 for record in success_records if record.get("solved_on") == "retry"
+        )
+        self.patient_generation_empty_count = sum(
+            1
+            for record in discard_records
+            if record.get("reason") == "patient_generation_empty"
+        )
+        self.qc_discarded_patients = sum(
+            1
+            for record in discard_records
+            if str(record.get("reason", "")).startswith("qc_discard:")
+        )
+        self.retry_fail_discards = sum(
+            1 for record in discard_records if self._is_retry_discard(record)
+        )
+        self.retry_attempts = self.retry_successes + self.retry_fail_discards
+        self.no_reflection_count = sum(
+            1 for record in discard_records if self._is_no_reflection_discard(record)
+        )
+        self.failed_reflection_count = sum(
+            1 for record in discard_records if self._is_failed_reflection_discard(record)
+        )
+        self.validated_reflection_count = len(self.memory.validated_reflections)
+        self.reflections_emitted_count = (
+            self.validated_reflection_count + self.failed_reflection_count
+        )
+
+        self.coverage_by_condition: set[str] = set()
+        self.coverage_by_curriculum_lane: dict[str, set[str]] = defaultdict(set)
+        self.coverage_by_exam_focus: dict[str, set[str]] = defaultdict(set)
+        for record in success_records:
+            condition_id = str(record.get("condition_id", ""))
+            if not condition_id:
+                continue
+            self.coverage_by_condition.add(condition_id)
+            for lane in _as_list(record.get("training_lanes")):
+                self.coverage_by_curriculum_lane[lane].add(condition_id)
+            for focus in _as_list(record.get("exam_focus")):
+                self.coverage_by_exam_focus[focus].add(condition_id)
+
+    def _is_retry_discard(self, record: dict[str, Any]) -> bool:
+        reason = str(record.get("reason", ""))
+        return reason == "malformed_judge_output" or reason.startswith("retry_failed:")
+
+    def _is_no_reflection_discard(self, record: dict[str, Any]) -> bool:
+        reason = str(record.get("reason", ""))
+        return reason in {"malformed_judge_output", "retry_failed:no_reflection"}
+
+    def _is_failed_reflection_discard(self, record: dict[str, Any]) -> bool:
+        reason = str(record.get("reason", ""))
+        return reason in {
+            "retry_failed:malformed_judge_output",
+            "retry_failed:unrecovered",
+        }
+
+    def _completed_eval_milestones_from_memory(self) -> set[int]:
+        milestones: set[int] = set()
+        for summary in [*self.memory.eval_summaries, *self.memory.heldout_eval_summaries]:
+            value = summary.get("trigger_successful_cases")
+            if isinstance(value, int):
+                milestones.add(value)
+        return milestones
 
     def _maybe_run_periodic_evaluation(self) -> None:
         summary = self._build_summary()
@@ -1446,14 +1554,47 @@ class ExaminationEvaluationRunner:
 def _load_optional_jsonl(path: str | None) -> list[dict[str, Any]]:
     if not path:
         return []
+    resolved = Path(path)
+    return _load_jsonl_allow_truncated_final_line(resolved)
+
+
+def _load_jsonl_if_exists(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return _load_jsonl_allow_truncated_final_line(path)
+
+
+def _load_jsonl_allow_truncated_final_line(path: Path) -> list[dict[str, Any]]:
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     records: list[dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            records.append(_loads_json(stripped))
+    for index, line in enumerate(lines):
+        try:
+            records.append(_loads_json(line))
+        except ValueError:
+            if index == len(lines) - 1:
+                break
+            raise
     return records
+
+
+def _max_numeric_suffix(
+    records: list[dict[str, Any]],
+    field: str,
+    fallback: int,
+) -> int:
+    maximum = fallback
+    for record in records:
+        value = record.get(field)
+        if not isinstance(value, str):
+            continue
+        suffix = value.rsplit("_", 1)[-1]
+        if suffix.isdigit():
+            maximum = max(maximum, int(suffix))
+    return maximum
 
 
 def _loads_json(text: str) -> dict[str, Any]:

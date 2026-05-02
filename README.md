@@ -170,6 +170,35 @@ By default, embeddings run on CPU so they do not consume Qwen GPU memory:
 EMBEDDING_DEVICE=cpu
 ```
 
+## Persistent Current Run / Resume
+
+By default, training writes to a new timestamped directory under `runs/`. For a server job with a wall-time limit, opt into a stable resumable directory:
+
+```bash
+CURRENT_RUN=1 bash scripts/run_qwen36_27b_baseline_and_train.sh
+```
+
+This writes training artifacts under:
+
+```text
+runs/current_run/
+```
+
+If the job is killed, rerun with the same target count. The loop reloads the existing JSONL memory files, rebuilds the in-memory semantic indexes, restores progress counters, and continues until the requested total number of successful cases is reached:
+
+```bash
+CURRENT_RUN=1 SKIP_BASELINE=1 bash scripts/run_qwen36_27b_baseline_and_train.sh
+```
+
+Use `SKIP_BASELINE=1` when resuming so the 200-question baseline evaluation is not repeated. The stable directory name can be changed with `CURRENT_RUN_DIR=my_run`.
+
+The direct Python entry points expose the same option:
+
+```bash
+python run_simulation.py ... --current-run
+python run_benchmark.py ... --current-run --skip-baseline
+```
+
 ## Run Examination Selection
 
 Use the same single-process benchmark path so Qwen is loaded once for baseline eval, training, and milestone evals:
